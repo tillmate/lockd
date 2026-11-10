@@ -31,6 +31,8 @@ function applyStagingDefaults() {
     NOTIFICATION_KEY: derive('notification-key'),
     DEMO_STAFF_PASSWORD: PUBLIC_DEMO_STAFF_PASSWORD,
     DEMO_DJ_PASSWORD: PUBLIC_DEMO_DJ_PASSWORD,
+    // The derived role URLs keep the owner URL's TLS requirement.
+    DB_SSLMODE: u.searchParams.get('sslmode') ?? '',
   };
   for (const [k, v] of Object.entries(defaults)) if (!process.env[k]) process.env[k] = v;
 }
@@ -55,18 +57,23 @@ export const runtimeDatabaseUrl = () =>
   process.env.DATABASE_URL || compose('lockd_runtime', process.env.RUNTIME_DB_PASSWORD);
 export const notifierDatabaseUrl = () =>
   process.env.NOTIFIER_DATABASE_URL || compose('lockd_notifier', process.env.NOTIFIER_DB_PASSWORD);
-// Connection options for every database client. Managed Postgres that requires TLS with its own
-// CA (DigitalOcean binds it as CA_CERT) sets DB_CA_CERT to that PEM: the server certificate must
-// chain to it, and like libpq's verify-ca the host name is not compared. Without DB_CA_CERT the
-// connection string is used as is.
+// Connection options for every database client, for managed Postgres that requires TLS. With the
+// provider's CA in DB_CA_CERT (DigitalOcean can bind it as CA_CERT) the server certificate must
+// chain to it; like libpq's verify-ca the host name is not compared. Otherwise sslmode=require on
+// the URL, or on the owner URL the role URLs are derived from, keeps its libpq meaning: encrypted,
+// without certificate verification (pg would treat it as verify-full and reject a private CA).
+// Anything else is used as is.
 export function pgConfig(connectionString: string) {
   const ca = process.env.DB_CA_CERT?.trim();
-  if (!ca) return { connectionString };
   const url = new URL(connectionString);
+  const mode = url.searchParams.get('sslmode') ?? process.env.DB_SSLMODE;
+  if (!ca && mode !== 'require') return { connectionString };
   // An sslmode in the URL would replace the explicit TLS options below.
   url.searchParams.delete('sslmode');
   return {
     connectionString: url.toString(),
-    ssl: { ca, rejectUnauthorized: true, checkServerIdentity: () => undefined },
+    ssl: ca
+      ? { ca, rejectUnauthorized: true, checkServerIdentity: () => undefined }
+      : { rejectUnauthorized: false },
   };
 }
