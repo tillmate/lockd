@@ -1,0 +1,67 @@
+# Lockd
+
+Jamaican DJ-first booking software. **Local development implementation; not a production service.** Event deposits go directly to the DJ. This app does not collect, hold, capture or refund money.
+
+The first working slice is: verified DJ account → profile/package/payment instructions → public booking page → 48-hour hold → immutable signed agreement → private receipt evidence → DJ actual-receipt attestation → confirmed booking.
+
+## Run locally
+
+Requires Node.js 24 and npm. PostgreSQL native binaries are installed with the development dependency; Docker is optional, not required. The local database binds only to `127.0.0.1:55432` and persists under ignored `.local/postgres`.
+
+```sh
+npm ci
+npm run db:local
+```
+
+Keep that terminal running. It creates a local database, applies migrations, generates random database passwords, and writes ignored `.env.local`. In a second terminal:
+
+```sh
+npm run dev
+```
+
+Open [local Lockd](http://127.0.0.1:3100). Optionally run `npm run worker` in a third terminal for expiry every 30 seconds. Expiry also runs transactionally on booking reads and allocation; a stopped worker cannot cause a double booking.
+
+1. Create a synthetic DJ account with an `example.test` email and a password of at least 12 characters.
+2. Open **Test mailbox**, follow the verification link, verify and sign in.
+3. Complete onboarding with test payment instructions and a clearly marked test agreement. Do not enter real bank or client information.
+4. Open the DJ booking page in another browser or private window. Choose an event more than 72 hours away, create a hold, and save the private access link.
+5. Sign the agreement and upload a synthetic PNG/JPEG receipt. The booking remains pending.
+6. In the DJ workspace, open the booking, inspect the receipt, and record a synthetic actual-receipt attestation. Only this explicit authorized action can confirm the booking.
+
+All mailbox messages stay on disk. No email or financial provider is connected. Test links are fragment-based and removed from browser history when exchanged for an HttpOnly cookie. Do not share them publicly.
+
+## Verification
+
+```sh
+npm run typecheck
+npm run lint
+npm test
+npx playwright install chromium
+npm run test:e2e
+npm run build
+npm audit
+```
+
+Integration tests create and drop a uniquely named **local test database**, apply the same migrations, and use separate PostgreSQL connections to test races. They never reset the development database. Browser tests add clearly labeled synthetic accounts/bookings to the local development database and save screenshots under `docs/evidence/`. Use only a local test environment. Tests and migration scripts reject remote database hosts.
+
+## Architecture
+
+- Next.js App Router, React, strict TypeScript, shared Zod validation.
+- PostgreSQL 18 with RLS and a restricted `lockd_runtime` role. The HTTP process uses this role, not the migration owner.
+- Narrow SQL functions perform state changes and fixed-search-path privilege elevation. Runtime has no direct table-write grants.
+- Per-DJ row locks serialize hold creation, evidence, verification, blocked intervals and completion. A GiST exclusion constraint prevents all occupied-range overlaps, including setup/travel buffers and different packages.
+- Scrypt password hashes; 256-bit session and client-access tokens stored as SHA-256 hashes. Verified DJ email required before onboarding. Password resets invalidate sessions.
+- Private image evidence in PostgreSQL `bytea`, under the same RLS as its booking. Size/signature/decoder checks, pixel limits and PNG re-encoding remove image metadata. Downloads require the owning DJ session or matching guest token and use no-store responses.
+- Agreements, signatures, claims, verification decisions and booking events are append-only. Signed content includes the exact service, price, time, venue and direct-payment instructions.
+- Durable transactional notification outbox; **external delivery is not implemented**. Account verification/reset use an explicit loopback-only local mailbox adapter. The client sees confirmation immediately on the private page (30-second polling, or reload).
+- Integer JMD minor units and UTC timestamps; UI input/output uses `America/Jamaica` (UTC−05:00).
+
+Read [implementation status](IMPLEMENTATION_STATUS.md), [architecture decisions](docs/ARCHITECTURE.md), [security boundaries](docs/SECURITY.md), and the supplied [handover](LOCKD_CODEX_HANDOVER.md).
+
+## Scope and launch gates
+
+This slice supports one configured service per DJ via onboarding, personal availability blocks, the three-active Free cap, partial/rejected evidence, duplicate detection, late-payment exceptions and completion. Paid subscriptions, founding-seat allocation, cancellation/refund/reschedule workflows, staff MFA/admin, reviewed legal terms, verified listing moderation, retention operations, external messaging and production hosting remain separate milestones. No invented bank instructions, paid entitlements, reviews or ratings are shipped.
+
+The Figma source was inspected through MCP. The application adapts the approved ivory/gold visual language and real booking steps to responsive HTML; it is not a pixel-for-pixel reconstruction of all design frames. Static logo is sourced from Figma; Inter is bundled locally via Fontsource. The initial audit found no existing application and the owner confirmed a new repository was needed.
+
+**Do not deploy or run against live data without an explicitly reviewed release.** Public repository availability is source sharing, not an application deployment.

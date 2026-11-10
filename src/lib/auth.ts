@@ -1,0 +1,106 @@
+import { randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
+import { promisify } from 'node:util';
+import { hash, transaction, type Context } from './db';
+import { credentials } from './validation';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+const scrypt = promisify(scryptCallback);
+export const newToken = () => randomBytes(32).toString('hex');
+export async function passwordHash(password: string) {
+  const salt = randomBytes(16).toString('hex');
+  const derived = (await scrypt(password, salt, 64)) as Buffer;
+  return `scrypt:${salt}:${derived.toString('hex')}`;
+}
+async function matches(password: string, encoded: string) {
+  const [, salt, key] = encoded.split(':');
+  const derived = (await scrypt(password, salt, 64)) as Buffer;
+  return timingSafeEqual(derived, Buffer.from(key, 'hex'));
+}
+export function localMode() {
+  return (
+    process.env.LOCKD_LOCAL_ONLY === '1' &&
+    ['http://127.0.0.1:3100', 'http://localhost:3100'].includes(process.env.APP_ORIGIN ?? '')
+  );
+}
+// Local-only delivery adapter. Tokens never returned in registration/reset API responses.
+export async function deliverLocal(recipient: string, kind: string, token: string) {
+  if (!localMode()) return;
+  await mkdir('.local/mailbox', { recursive: true });
+  await writeFile(
+    `.local/mailbox/${hash(token)}.json`,
+    JSON.stringify({ recipient, kind, token, createdAt: new Date().toISOString() }),
+    { mode: 0o600 },
+  );
+}
+export async function register(input: unknown) {
+  const d = credentials.parse(input);
+  const token = newToken();
+  const p = await passwordHash(d.password);
+  const id = await transaction(
+    {},
+    async (c) =>
+      (await c.query('SELECT lockd.register_user($1,$2,$3) AS id', [d.email, p, hash(token)]))
+        .rows[0].id as string | null,
+  );
+  if (id) await deliverLocal(d.email, 'verify', token);
+}
+export async function verifyEmail(token: string) {
+  return transaction(
+    {},
+    async (c) =>
+      (await c.query('SELECT lockd.consume_email_token($1) AS ok', [hash(token)])).rows[0]
+        .ok as boolean,
+  );
+}
+export async function login(input: unknown) {
+  const d = credentials.parse(input);
+  const row = await transaction(
+    {},
+    async (c) =>
+      (await c.query('SELECT * FROM lockd.auth_lookup($1)', [d.email])).rows[0] as
+        { id: string; password_hash: string; verified: boolean } | undefined,
+  );
+  const fallback = 'scrypt:00000000000000000000000000000000:' + '00'.repeat(64);
+  const valid = await matches(d.password, row?.password_hash ?? fallback);
+  if (!row || !valid || !row.verified)
+    throw new Error('Check your credentials and verify your email before signing in.');
+  const token = newToken();
+  await transaction({}, async (c) => {
+    await c.query('SELECT lockd.new_session($1,$2)', [row.id, hash(token)]);
+  });
+  return token;
+}
+export async function requestReset(email: string) {
+  const token = newToken();
+  await transaction({}, async (c) => {
+    await c.query('SELECT lockd.request_reset($1,$2)', [email, hash(token)]);
+  });
+  // Only deliver if there is an actual token; the local adapter is not enabled remotely.
+  const exists = await transaction(
+    {},
+    async (c) => (await c.query('SELECT * FROM lockd.auth_lookup($1)', [email])).rowCount,
+  );
+  if (exists) await deliverLocal(email, 'reset', token);
+}
+export async function resetPassword(token: string, password: string) {
+  const p = await passwordHash(password);
+  return transaction(
+    {},
+    async (c) =>
+      (await c.query('SELECT lockd.consume_email_token($1,$2) AS ok', [hash(token), p])).rows[0]
+        .ok as boolean,
+  );
+}
+export async function currentUser(ctx: Context) {
+  return transaction(
+    ctx,
+    async (c) => (await c.query('SELECT lockd.actor_id() AS id')).rows[0].id as string | null,
+  );
+}
+export async function readLocalToken(id: string) {
+  return JSON.parse(await readFile(`.local/mailbox/${id}.json`, 'utf8')) as {
+    recipient: string;
+    kind: string;
+    token: string;
+    createdAt: string;
+  };
+}

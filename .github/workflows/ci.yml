@@ -1,0 +1,37 @@
+name: Lockd checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: local_ci_only
+          POSTGRES_DB: lockd
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      MIGRATION_DATABASE_URL: postgresql://postgres:local_ci_only@127.0.0.1:5432/lockd
+      DATABASE_URL: postgresql://lockd_runtime:runtime_ci_only@127.0.0.1:5432/lockd
+      APP_ORIGIN: http://127.0.0.1:3100
+      LOCKD_LOCAL_ONLY: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run db:migrate
+      - run: node --input-type=module -e "import pg from 'pg'; const c=new pg.Client({connectionString:process.env.MIGRATION_DATABASE_URL}); await c.connect(); await c.query(\"ALTER ROLE lockd_runtime PASSWORD 'runtime_ci_only'\"); await c.end();"
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - run: npm run build
+      - run: npm audit --audit-level=moderate

@@ -1,0 +1,170 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
+import { checkOrigin, context, failure, limit, setSession } from '@/lib/http';
+import { register, login, verifyEmail, resetPassword, requestReset, currentUser } from '@/lib/auth';
+import { transaction } from '@/lib/db';
+import * as service from '@/lib/service';
+import { capability } from '@/lib/validation';
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+type Params = { params: Promise<{ path: string[] }> };
+export async function POST(req: NextRequest, { params }: Params) {
+  try {
+    checkOrigin(req);
+    const { path } = await params;
+    const route = path.join('/');
+    const ctx = await context();
+    // Hard bound while streaming; do not trust Content-Length or parse arbitrarily large multipart bodies.
+    const max = route.endsWith('/proof') ? 5 * 1024 * 1024 + 65536 : 32768;
+    if (Number(req.headers.get('content-length') ?? 0) > max)
+      throw new Error('Upload is too large');
+    const reader = req.body?.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    if (reader)
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.length;
+        if (size > max) {
+          await reader.cancel();
+          throw new Error('Upload is too large');
+        }
+        chunks.push(value);
+      }
+    const raw = Buffer.concat(chunks);
+    const parse = () => JSON.parse(raw.toString('utf8')) as unknown;
+    if (route === 'auth/register' || route === 'auth/login') {
+      const d = z
+        .object({ email: z.email().max(254), password: z.string().min(12).max(128) })
+        .parse(parse());
+      await limit(`auth:${d.email.toLowerCase()}`, 20);
+      await limit('auth:global', 300);
+      if (route === 'auth/register') {
+        await register(d);
+        return NextResponse.json({ ok: true, message: 'Check your email to verify your account.' });
+      }
+      const token = await login(d);
+      const res = NextResponse.json({ ok: true });
+      setSession(res, 'lockd_session', token);
+      return res;
+    }
+    if (route === 'auth/verify') {
+      const d = z.object({ token: capability }).parse(parse());
+      if (!(await verifyEmail(d.token))) throw new Error('Verification link is invalid or expired');
+      return NextResponse.json({ ok: true });
+    }
+    if (route === 'auth/logout') {
+      await transaction(ctx, async (c) => {
+        await c.query('SELECT lockd.logout()');
+      });
+      const res = NextResponse.json({ ok: true });
+      setSession(res, 'lockd_session', '', 0);
+      return res;
+    }
+    if (route === 'auth/forgot') {
+      const d = z.object({ email: z.email().max(254) }).parse(parse());
+      await limit(`reset:${d.email.toLowerCase()}`, 5);
+      await requestReset(d.email);
+      return NextResponse.json({ ok: true });
+    }
+    if (route === 'auth/reset') {
+      const d = z
+        .object({ token: capability, password: z.string().min(12).max(128) })
+        .parse(parse());
+      if (!(await resetPassword(d.token, d.password)))
+        throw new Error('Reset link is invalid or expired');
+      return NextResponse.json({ ok: true });
+    }
+    if (route === 'onboard') {
+      const id = await service.onboard(ctx, parse());
+      return NextResponse.json({ id });
+    }
+    if (route === 'holds') {
+      const d = z
+        .object({ creatorId: z.uuid(), clientEmail: z.email(), accessToken: capability })
+        .passthrough()
+        .parse(parse());
+      await limit(`holds:creator:${d.creatorId}`, 100);
+      await limit(`holds:email:${d.clientEmail.toLowerCase()}`, 15);
+      const id = await service.createHold(d);
+      const res = NextResponse.json({ id });
+      setSession(res, 'lockd_client', d.accessToken, 3600);
+      return res;
+    }
+    if (route === 'access') {
+      const d = z.object({ id: z.uuid(), token: capability }).parse(parse());
+      await limit(`access:${d.id}`, 60);
+      if (!(await service.booking({ guest: d.token }, d.id)))
+        throw new Error('Private booking link is invalid or expired');
+      const res = NextResponse.json({ ok: true });
+      setSession(res, 'lockd_client', d.token, 3600);
+      return res;
+    }
+    if (path[0] === 'bookings' && path.length === 3) {
+      const bid = z.uuid().parse(path[1]);
+      const action = path[2];
+      if (action === 'sign') await service.sign(ctx, bid, parse());
+      else if (action === 'proof') {
+        if (!(await service.booking(ctx, bid))) throw new Error('Private booking access required');
+        await limit(`proof:${bid}`, 30);
+        const form = await new Response(raw, {
+          headers: { 'Content-Type': req.headers.get('content-type') ?? '' },
+        }).formData();
+        const file = form.get('file');
+        if (!(file instanceof File)) throw new Error('Choose a PNG or JPEG receipt');
+        const amount = Number(form.get('amountMinor'));
+        const id = await service.proof(
+          ctx,
+          bid,
+          String(form.get('reference') ?? ''),
+          amount,
+          Buffer.from(await file.arrayBuffer()),
+        );
+        return NextResponse.json({ id });
+      } else if (action === 'verify')
+        return NextResponse.json({ status: await service.verify(ctx, bid, parse()) });
+      else if (action === 'complete') await service.complete(ctx, bid);
+      else return NextResponse.json({ error: 'Not found' }, { status: 404 });
+      return NextResponse.json({ ok: true });
+    }
+    if (route === 'blocks') return NextResponse.json({ id: await service.block(ctx, parse()) });
+    if (route === 'blocks/remove') {
+      const d = z.object({ id: z.uuid() }).parse(parse());
+      await service.unblock(ctx, d.id);
+      return NextResponse.json({ ok: true });
+    }
+    return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  } catch (e) {
+    return failure(e);
+  }
+}
+export async function GET(_req: NextRequest, { params }: Params) {
+  try {
+    const { path } = await params;
+    const ctx = await context();
+    if (path[0] === 'bookings' && path.length === 2) {
+      const data = await service.booking(ctx, path[1]);
+      return NextResponse.json(data ?? { error: 'Booking not found' }, {
+        status: data ? 200 : 404,
+        headers: { 'Cache-Control': 'no-store' },
+      });
+    }
+    if (path[0] === 'receipts' && path.length === 2) {
+      const row = await service.receipt(ctx, path[1]);
+      if (!row) return new NextResponse(null, { status: 404 });
+      return new NextResponse(new Uint8Array(row.image), {
+        headers: {
+          'Content-Type': row.mime,
+          'Content-Disposition': 'attachment; filename="receipt.png"',
+          'Cache-Control': 'private, no-store',
+          'X-Content-Type-Options': 'nosniff',
+        },
+      });
+    }
+    if (path[0] === 'me') return NextResponse.json({ id: await currentUser(ctx) });
+    return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  } catch (e) {
+    return failure(e);
+  }
+}
