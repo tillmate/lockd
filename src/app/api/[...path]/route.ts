@@ -4,6 +4,7 @@ import { checkOrigin, context, failure, limit, setSession } from '@/lib/http';
 import { register, login, verifyEmail, resetPassword, requestReset, currentUser } from '@/lib/auth';
 import { transaction } from '@/lib/db';
 import * as service from '@/lib/service';
+import * as billing from '@/lib/billing';
 import { capability } from '@/lib/validation';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -84,6 +85,45 @@ export async function POST(req: NextRequest, { params }: Params) {
       await service.updateProfile(ctx, parse());
       return NextResponse.json({ ok: true });
     }
+    if (route === 'billing/invoices') {
+      await limit(`invoices:${ctx.session ?? 'anonymous'}`, 20);
+      return NextResponse.json({ id: await billing.issue(ctx, parse()) });
+    }
+    if (route === 'staff/mfa') {
+      await billing.stepUp(ctx, parse());
+      return NextResponse.json({ ok: true });
+    }
+    if (route === 'staff/approve-founding') {
+      await billing.approve(ctx, parse());
+      return NextResponse.json({ ok: true });
+    }
+    if (path[0] === 'invoices' && path.length === 3) {
+      const id = z.uuid().parse(path[1]);
+      if (path[2] === 'proof') {
+        if (!(await billing.invoice(ctx, id))) throw new Error('Invoice access required');
+        await limit(`invoice-proof:${id}`, 30);
+        const form = await new Response(raw, {
+          headers: { 'Content-Type': req.headers.get('content-type') ?? '' },
+        }).formData();
+        const file = form.get('file');
+        if (!(file instanceof File)) throw new Error('Choose a PNG or JPEG receipt');
+        return NextResponse.json({
+          id: await billing.upload(
+            ctx,
+            id,
+            String(form.get('reference') ?? ''),
+            Number(form.get('amountMinor')),
+            Buffer.from(await file.arrayBuffer()),
+          ),
+        });
+      }
+      if (path[2] === 'reconcile')
+        return NextResponse.json({ state: await billing.reconcile(ctx, id, parse()) });
+      if (path[2] === 'void') {
+        await billing.voidInvoice(ctx, id, parse());
+        return NextResponse.json({ ok: true });
+      }
+    }
     if (route === 'holds') {
       const d = z
         .object({ creatorId: z.uuid(), clientEmail: z.email(), accessToken: capability })
@@ -158,6 +198,25 @@ export async function GET(_req: NextRequest, { params }: Params) {
   try {
     const { path } = await params;
     const ctx = await context();
+    if (path[0] === 'invoices' && path.length === 2) {
+      const data = await billing.invoice(ctx, path[1]);
+      return NextResponse.json(data ?? { error: 'Invoice not found' }, {
+        status: data ? 200 : 404,
+        headers: { 'Cache-Control': 'no-store' },
+      });
+    }
+    if (path[0] === 'invoice-receipts' && path.length === 2) {
+      const r = await billing.receipt(ctx, path[1]);
+      if (!r) return new NextResponse(null, { status: 404 });
+      return new NextResponse(new Uint8Array(r.image), {
+        headers: {
+          'Content-Type': 'image/png',
+          'Content-Disposition': 'attachment; filename="invoice-receipt.png"',
+          'Cache-Control': 'private, no-store',
+          'X-Content-Type-Options': 'nosniff',
+        },
+      });
+    }
     if (path[0] === 'bookings' && path.length === 2) {
       const data = await service.booking(ctx, path[1]);
       return NextResponse.json(data ?? { error: 'Booking not found' }, {

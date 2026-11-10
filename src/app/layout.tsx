@@ -11,7 +11,7 @@ export const metadata: Metadata = {
 export const dynamic = 'force-dynamic';
 export default function Layout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en-JM">
+    <html lang="en-JM" data-scroll-behavior="smooth">
       <body>
         <a className="skip" href="#main">
           Skip to content

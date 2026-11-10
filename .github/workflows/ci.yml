@@ -26,6 +26,8 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci
+      - name: Generate ephemeral test MFA encryption key
+        run: node --input-type=module -e "import {randomBytes} from 'node:crypto'; import {appendFileSync} from 'node:fs'; appendFileSync(process.env.GITHUB_ENV, 'STAFF_MFA_KEY='+randomBytes(32).toString('hex')+'\n');"
       - run: npm run db:migrate
       - run: node --input-type=module -e "import pg from 'pg'; const c=new pg.Client({connectionString:process.env.MIGRATION_DATABASE_URL}); await c.connect(); await c.query(\"ALTER ROLE lockd_runtime PASSWORD 'runtime_ci_only'\"); await c.end();"
       - run: npm run typecheck

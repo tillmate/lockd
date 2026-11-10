@@ -89,17 +89,7 @@ export async function proof(
   z.uuid().parse(bid);
   z.string().trim().min(2).max(100).parse(reference);
   z.number().int().positive().max(100000000).parse(amount);
-  if (bytes.length > 5 * 1024 * 1024 || bytes.length < 20)
-    throw new Error('Receipt must be a PNG or JPEG image, up to 5 MB');
-  const png = bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
-  const jpeg = bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
-  if (!png && !jpeg) throw new Error('Receipt must contain a PNG or JPEG image');
-  const image = sharp(bytes, { limitInputPixels: 20_000_000, failOn: 'warning' });
-  const meta = await image.metadata();
-  if (!['png', 'jpeg'].includes(meta.format ?? '') || (meta.pages ?? 1) !== 1)
-    throw new Error('Upload a single PNG or JPEG receipt');
-  const clean = await image.rotate().png().toBuffer();
-  if (clean.length > 5 * 1024 * 1024) throw new Error('Processed receipt exceeds 5 MB');
+  const clean = await sanitizeReceipt(bytes);
   return transaction(
     ctx,
     async (c) =>
@@ -113,6 +103,20 @@ export async function proof(
         ])
       ).rows[0].id as string,
   );
+}
+export async function sanitizeReceipt(bytes: Buffer) {
+  if (bytes.length > 5 * 1024 * 1024 || bytes.length < 20)
+    throw new Error('Receipt must be a PNG or JPEG image, up to 5 MB');
+  const png = bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  const jpeg = bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
+  if (!png && !jpeg) throw new Error('Receipt must contain a PNG or JPEG image');
+  const image = sharp(bytes, { limitInputPixels: 20_000_000, failOn: 'warning' });
+  const meta = await image.metadata();
+  if (!['png', 'jpeg'].includes(meta.format ?? '') || (meta.pages ?? 1) !== 1)
+    throw new Error('Upload a single PNG or JPEG receipt');
+  const clean = await image.rotate().png().toBuffer();
+  if (clean.length > 5 * 1024 * 1024) throw new Error('Processed receipt exceeds 5 MB');
+  return clean;
 }
 export async function verify(ctx: Context, bid: string, input: unknown) {
   z.uuid().parse(bid);
@@ -292,7 +296,9 @@ export async function dashboard(ctx: Context) {
         'SELECT id,lower(slot) AS starts_at,upper(slot) AS ends_at,reason FROM lockd.occupied_slots WHERE booking_id IS NULL ORDER BY lower(slot)',
       )
     ).rows as { id: string; starts_at: string; ends_at: string; reason: string }[];
-    return { account, bookings, blocks };
+    const pro = (await c.query('SELECT lockd.pro_access($1) AS pro', [account.id])).rows[0]
+      .pro as boolean;
+    return { account, bookings, blocks, pro };
   });
 }
 export async function receipt(ctx: Context, cid: string) {

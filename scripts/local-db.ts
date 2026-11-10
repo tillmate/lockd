@@ -7,9 +7,16 @@ import { migrate } from './migrate.js';
 
 mkdirSync('.local', { recursive: true });
 const secretFile = '.local/database-passwords.json';
-const secrets: { admin: string; runtime: string } = existsSync(secretFile)
+const secrets: { admin: string; runtime: string; mfa?: string } = existsSync(secretFile)
   ? JSON.parse(readFileSync(secretFile, 'utf8'))
   : { admin: randomBytes(24).toString('hex'), runtime: randomBytes(24).toString('hex') };
+// Preserve an existing MFA key when the database supervisor regenerates .env.local.
+try {
+  process.loadEnvFile('.env.local');
+} catch {
+  /* First setup */
+}
+secrets.mfa = process.env.STAFF_MFA_KEY ?? secrets.mfa ?? randomBytes(32).toString('hex');
 writeFileSync(secretFile, JSON.stringify(secrets), { mode: 0o600 });
 const databaseDir = resolve('.local/postgres');
 const db = new EmbeddedPostgres({
@@ -41,7 +48,7 @@ await c.query(`ALTER ROLE lockd_runtime PASSWORD '${secrets.runtime}'`);
 await c.end();
 writeFileSync(
   '.env.local',
-  `DATABASE_URL=postgresql://lockd_runtime:${secrets.runtime}@127.0.0.1:55432/lockd\nMIGRATION_DATABASE_URL=${adminUrl}\nAPP_ORIGIN=http://127.0.0.1:3100\nLOCKD_LOCAL_ONLY=1\n`,
+  `DATABASE_URL=postgresql://lockd_runtime:${secrets.runtime}@127.0.0.1:55432/lockd\nMIGRATION_DATABASE_URL=${adminUrl}\nAPP_ORIGIN=http://127.0.0.1:3100\nLOCKD_LOCAL_ONLY=1\nSTAFF_MFA_KEY=${secrets.mfa}\n`,
   { mode: 0o600 },
 );
 console.log(

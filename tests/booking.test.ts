@@ -1,11 +1,13 @@
 import { beforeAll, afterAll, describe, it, expect } from 'vitest';
 import pg from 'pg';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomBytes } from 'node:crypto';
 import sharp from 'sharp';
 import { migrate } from '../scripts/migrate';
 import { transaction, hash, closeDatabase } from '../src/lib/db';
 import { newToken, passwordHash, login, verifyEmail, resetPassword } from '../src/lib/auth';
 import * as s from '../src/lib/service';
+import * as billing from '../src/lib/billing';
+import { base32, encryptSecret, totp, verifyTotp } from '../src/lib/mfa';
 import { moneyToMinor } from '../src/lib/validation';
 let admin: pg.Client, control: pg.Client;
 let testName: string;
@@ -35,6 +37,7 @@ beforeAll(async () => {
   runtime.pathname = `/${testName}`;
   process.env.DATABASE_URL = runtime.toString();
   process.env.LOCKD_LOCAL_ONLY = '0';
+  process.env.STAFF_MFA_KEY ??= randomBytes(32).toString('hex');
 });
 afterAll(async () => {
   await closeDatabase();
@@ -177,6 +180,60 @@ async function expiry(id: string, remainingSeconds: number, grace = false) {
   await admin.query(
     "UPDATE lockd.bookings SET created_at=now()+make_interval(secs=>$2)-interval '48 hours',original_expires_at=now()+make_interval(secs=>$2),expires_at=now()+make_interval(secs=>$2)+CASE WHEN $3 THEN interval '24 hours' ELSE interval '0 hours' END,grace_used=$3 WHERE id=$1",
     [id, remainingSeconds, grace],
+  );
+}
+async function reviewer() {
+  const f = await fixture(),
+    secret = base32(randomBytes(20));
+  const uid = (await admin.query('SELECT user_id FROM lockd.accounts WHERE id=$1', [f.account]))
+    .rows[0].user_id;
+  await admin.query(
+    'INSERT INTO lockd.billing_staff_members(user_id,secret_cipher,provision_reason) VALUES($1,$2,$3)',
+    [uid, encryptSecret(secret), 'Synthetic billing reviewer for isolated tests'],
+  );
+  const code = totp(secret);
+  await billing.stepUp({ session: f.session }, { code });
+  return { ...f, secret, code, uid, ctx: { session: f.session } };
+}
+async function enableBilling() {
+  await admin.query(
+    "UPDATE lockd.billing_settings SET enabled=true,business_name='SYNTHETIC LOCKD',instructions='TEST ONLY — do not send real funds.',verified_by='Synthetic local test fixture' WHERE singleton",
+  );
+}
+async function invoiceFixture(plan = 'monthly') {
+  await enableBilling();
+  const dj = await fixture(),
+    staff = await reviewer();
+  if (plan === 'founding')
+    await billing.approve(staff.ctx, {
+      accountId: dj.account,
+      reason: 'Synthetic Jamaican DJ eligibility reviewed',
+      attest: true,
+    });
+  const ctx = { session: dj.session },
+    id = await billing.issue(ctx, {
+      plan,
+      billingName: 'Synthetic Billing DJ',
+      billingEmail: dj.email,
+      requestId: randomUUID(),
+    });
+  const amount = plan === 'monthly' ? 350000 : plan === 'annual' ? 3600000 : 2500000;
+  const claim = await billing.upload(ctx, id, 'SYNTHETIC-INVOICE', amount, await png());
+  return { dj, staff, ctx, id, claim, amount };
+}
+const invoiceDecision = (claimId: string, amountMinor = 350000) => ({
+  claimId,
+  decision: 'received',
+  amountMinor,
+  bankReference: `SYNTHETIC-BANK-${randomUUID()}`,
+  receivedAt: new Date().toISOString(),
+  reason: 'Synthetic actual bank receipt verification',
+  attest: true,
+});
+async function moveSubscriptionEnd(account: string, daysFromNow: number) {
+  await admin.query(
+    "UPDATE lockd.subscriptions SET starts_at=now()+make_interval(days=>$2)-interval '1 year',ends_at=now()+make_interval(days=>$2) WHERE account_id=$1",
+    [account, daysFromNow],
   );
 }
 
@@ -960,5 +1017,408 @@ describe('PostgreSQL booking slice', () => {
     b = (await s.booking(h.ctx, h.id))!;
     expect(b.agreements).toHaveLength(3);
     expect(b.amendments[0].state).toBe('expired');
+  });
+});
+
+describe('Manual software subscriptions and scoped staff MFA', () => {
+  it('matches RFC 6238 SHA-1 vectors and rejects malformed or expired codes', () => {
+    const secret = base32(Buffer.from('12345678901234567890'));
+    for (const [time, expected] of [
+      [59, '94287082'],
+      [1111111109, '07081804'],
+      [1111111111, '14050471'],
+      [1234567890, '89005924'],
+      [2000000000, '69279037'],
+      [20000000000, '65353130'],
+    ] as const)
+      expect(totp(secret, time, 8)).toBe(expected);
+    expect(verifyTotp(secret, totp(secret, 1000), 1000)).toBe(Math.floor(1000 / 30));
+    expect(verifyTotp(secret, totp(secret, 1000), 2000)).toBeNull();
+    expect(verifyTotp(secret, '12')).toBeNull();
+  });
+  it('blocks collection until bank configuration exists and enforces exact plan-specific invoice prices', async () => {
+    const f = await fixture(),
+      ctx = { session: f.session };
+    await admin.query('UPDATE lockd.billing_settings SET enabled=false');
+    const input = {
+      plan: 'monthly',
+      billingName: 'Synthetic DJ billing',
+      billingEmail: f.email,
+      requestId: randomUUID(),
+    };
+    await expect(billing.issue(ctx, input)).rejects.toThrow(/not configured/);
+    await enableBilling();
+    const id = await billing.issue(ctx, input);
+    expect(await billing.issue(ctx, input)).toBe(id);
+    expect((await billing.invoice(ctx, id))!.amount_minor).toBe(350000);
+    await expect(billing.issue(ctx, { ...input, plan: 'annual' })).rejects.toThrow(/already used/);
+    await billing.voidInvoice(ctx, id, { reason: 'Synthetic plan selection changed' });
+    const annual = await billing.issue(ctx, { ...input, plan: 'annual', requestId: randomUUID() });
+    expect((await billing.invoice(ctx, annual))!.amount_minor).toBe(3600000);
+    await expect(
+      admin.query('UPDATE lockd.subscription_invoices SET amount_minor=1 WHERE id=$1', [annual]),
+    ).rejects.toThrow(/Immutable invoice/);
+  });
+  it('requires independent staff and fresh MFA; rejects replay and revocation immediately', async () => {
+    const x = await invoiceFixture();
+    const plain = await login({ email: x.staff.email, password: 'Testing-password-123!' });
+    await expect(
+      billing.reconcile({ session: plain }, x.id, invoiceDecision(x.claim)),
+    ).rejects.toMatchObject({ code: '42501' });
+    await expect(billing.stepUp({ session: plain }, { code: x.staff.code })).rejects.toThrow(
+      /already used/,
+    );
+    await expect(billing.reconcile(x.ctx, x.id, invoiceDecision(x.claim))).rejects.toMatchObject({
+      code: '42501',
+    });
+    const own = await billing.issue(x.staff.ctx, {
+      plan: 'monthly',
+      billingName: 'Own staff invoice',
+      billingEmail: x.staff.email,
+      requestId: randomUUID(),
+    });
+    const claim = await billing.upload(x.staff.ctx, own, 'STAFF-OWN', 350000, await png());
+    await expect(billing.reconcile(x.staff.ctx, own, invoiceDecision(claim))).rejects.toMatchObject(
+      { code: '42501' },
+    );
+    await expect(
+      billing.approve(x.staff.ctx, {
+        accountId: x.staff.account,
+        reason: 'Attempted self approval',
+        attest: true,
+      }),
+    ).rejects.toMatchObject({ code: '42501' });
+    await admin.query(
+      "UPDATE lockd.billing_staff_sessions SET expires_at=now()-interval '1 second' WHERE user_id=$1",
+      [x.staff.uid],
+    );
+    await expect(
+      billing.reconcile(x.staff.ctx, x.id, invoiceDecision(x.claim)),
+    ).rejects.toMatchObject({ code: '42501' });
+    expect(await billing.invoice(x.staff.ctx, x.id)).toBeNull();
+  });
+  it('keeps invoice proof and partial receipts separate from entitlements and settles exactly once', async () => {
+    const x = await invoiceFixture(),
+      b = (await billing.home(x.ctx))!;
+    expect(b.pro).toBe(false);
+    await expect(
+      billing.reconcile(x.staff.ctx, x.id, { ...invoiceDecision(x.claim), attest: false }),
+    ).rejects.toThrow();
+    const first = invoiceDecision(x.claim, 100000);
+    expect(await billing.reconcile(x.staff.ctx, x.id, first)).toBe('open');
+    expect(await billing.reconcile(x.staff.ctx, x.id, first)).toBe('open');
+    expect((await billing.home(x.ctx))!.pro).toBe(false);
+    await expect(
+      billing.voidInvoice(x.ctx, x.id, { reason: 'Attempt to void paid evidence' }),
+    ).rejects.toThrow(/payment activity/);
+    const topup = await billing.upload(x.ctx, x.id, 'SYNTHETIC-TOPUP', 250000, await png());
+    const second = invoiceDecision(topup, 250000);
+    expect(await billing.reconcile(x.staff.ctx, x.id, second)).toBe('paid');
+    expect(await billing.reconcile(x.staff.ctx, x.id, second)).toBe('paid');
+    expect((await billing.home(x.ctx))!.pro).toBe(true);
+    expect((await billing.invoice(x.ctx, x.id))!.verified_minor).toBe(350000);
+    expect(
+      (await admin.query('SELECT * FROM lockd.subscription_grants WHERE invoice_id=$1', [x.id]))
+        .rowCount,
+    ).toBe(1);
+    await expect(
+      admin.query('DELETE FROM lockd.subscription_payments WHERE invoice_id=$1', [x.id]),
+    ).rejects.toThrow(/Immutable/);
+  });
+  it('rejects duplicate bank receipts across tenants and enforces invoice/claim ownership', async () => {
+    const a = await invoiceFixture(),
+      b = await invoiceFixture(),
+      v = invoiceDecision(a.claim);
+    await billing.reconcile(a.staff.ctx, a.id, v);
+    await expect(
+      billing.reconcile(b.staff.ctx, b.id, {
+        ...invoiceDecision(b.claim),
+        bankReference: v.bankReference.toLowerCase(),
+      }),
+    ).rejects.toMatchObject({ code: '23505' });
+    await expect(billing.reconcile(b.staff.ctx, b.id, invoiceDecision(a.claim))).rejects.toThrow(
+      /already recorded differently/,
+    );
+    expect(await billing.invoice(b.ctx, a.id)).toBeNull();
+    expect(await billing.receipt(b.ctx, a.claim)).toBeUndefined();
+    expect(await billing.invoice({}, a.id)).toBeNull();
+  });
+  it('rejection records zero funds, rejects impossible receipt dates, and permits corrected new evidence', async () => {
+    const x = await invoiceFixture();
+    await expect(
+      billing.reconcile(x.staff.ctx, x.id, {
+        ...invoiceDecision(x.claim),
+        receivedAt: new Date(Date.now() + 86400000).toISOString(),
+      }),
+    ).rejects.toThrow(/valid timestamp/);
+    await billing.reconcile(x.staff.ctx, x.id, {
+      claimId: x.claim,
+      decision: 'rejected',
+      amountMinor: 0,
+      bankReference: '',
+      receivedAt: null,
+      reason: 'Synthetic incorrect reference',
+      attest: false,
+    });
+    expect((await billing.home(x.ctx))!.pro).toBe(false);
+    expect((await billing.invoice(x.ctx, x.id))!.verified_minor).toBe(0);
+    const cid = await billing.upload(x.ctx, x.id, 'CORRECTED-SYNTHETIC', 350000, await png());
+    await billing.reconcile(x.staff.ctx, x.id, invoiceDecision(cid));
+    expect((await billing.home(x.ctx))!.pro).toBe(true);
+  });
+  it('enforces paid access and exact renewal grace in hold allocation without deleting existing bookings', async () => {
+    const x = await invoiceFixture();
+    await billing.reconcile(x.staff.ctx, x.id, invoiceDecision(x.claim));
+    const ids = await Promise.all([10, 20, 30, 40].map((day) => s.createHold(input(x.dj, day))));
+    expect(ids).toHaveLength(4);
+    await moveSubscriptionEnd(x.dj.account, -6);
+    expect((await billing.home(x.ctx))!.pro).toBe(true);
+    await s.createHold(input(x.dj, 50));
+    await moveSubscriptionEnd(x.dj.account, -7);
+    expect((await billing.home(x.ctx))!.pro).toBe(false);
+    await expect(s.createHold(input(x.dj, 60))).rejects.toThrow(/Free plan/);
+    expect((await s.dashboard(x.ctx))!.bookings).toHaveLength(5);
+    const renewal = await billing.issue(x.ctx, {
+      plan: 'monthly',
+      billingName: 'Synthetic renewal',
+      billingEmail: x.dj.email,
+      requestId: randomUUID(),
+    });
+    const cid = await billing.upload(x.ctx, renewal, 'RENEWAL', 350000, await png());
+    await billing.reconcile(x.staff.ctx, renewal, invoiceDecision(cid));
+    expect((await billing.home(x.ctx))!.pro).toBe(true);
+  });
+  it('renews from the original due date within grace, not the reconciliation date', async () => {
+    const x = await invoiceFixture('annual');
+    await billing.reconcile(x.staff.ctx, x.id, invoiceDecision(x.claim, x.amount));
+    await expect(
+      billing.issue(x.ctx, {
+        plan: 'annual',
+        billingName: 'Early renewal',
+        billingEmail: x.dj.email,
+        requestId: randomUUID(),
+      }),
+    ).rejects.toThrow(/15 days/);
+    await moveSubscriptionEnd(x.dj.account, -3);
+    const before = (await billing.home(x.ctx))!.subscription!;
+    const iid = await billing.issue(x.ctx, {
+        plan: 'annual',
+        billingName: 'Renewal',
+        billingEmail: x.dj.email,
+        requestId: randomUUID(),
+      }),
+      cid = await billing.upload(x.ctx, iid, 'ANNUAL-RENEWAL', 3600000, await png());
+    await billing.reconcile(x.staff.ctx, iid, invoiceDecision(cid, 3600000));
+    const after = (await billing.home(x.ctx))!.subscription!;
+    expect(new Date(after.starts_at).toISOString()).toBe(new Date(before.ends_at).toISOString());
+    expect(new Date(after.ends_at) > new Date()).toBe(true);
+  });
+  it('allocates founding membership only after approval and full verified bank funds', async () => {
+    await enableBilling();
+    const dj = await fixture(),
+      ctx = { session: dj.session },
+      staff = await reviewer();
+    const d = {
+      plan: 'founding',
+      billingName: 'Founding synthetic DJ',
+      billingEmail: dj.email,
+      requestId: randomUUID(),
+    };
+    await expect(billing.issue(ctx, d)).rejects.toThrow(/approval/);
+    await billing.approve(staff.ctx, {
+      accountId: dj.account,
+      reason: 'Verified synthetic Jamaican DJ eligibility',
+      attest: true,
+    });
+    const id = await billing.issue(ctx, d);
+    expect((await billing.home(ctx))!.seat).toBeNull();
+    const cid = await billing.upload(ctx, id, 'FOUNDING', 2500000, await png());
+    expect((await billing.home(ctx))!.seat).toBeNull();
+    await billing.reconcile(staff.ctx, id, invoiceDecision(cid, 2500000));
+    expect((await billing.home(ctx))!.seat).toBeGreaterThan(0);
+  });
+  it('preserves founding price for timely actual renewal receipt even if staff review is late', async () => {
+    const x = await invoiceFixture('founding');
+    await billing.reconcile(x.staff.ctx, x.id, invoiceDecision(x.claim, x.amount));
+    await moveSubscriptionEnd(x.dj.account, -6);
+    const iid = await billing.issue(x.ctx, {
+      plan: 'founding',
+      billingName: 'Founding renewal',
+      billingEmail: x.dj.email,
+      requestId: randomUUID(),
+    });
+    await admin.query('BEGIN');
+    try {
+      await admin.query('ALTER TABLE lockd.subscription_invoices DISABLE TRIGGER invoice_history');
+      await admin.query(
+        "UPDATE lockd.subscriptions SET starts_at=now()-interval '1 year',ends_at=now()-interval '8 days' WHERE account_id=$1",
+        [x.dj.account],
+      );
+      await admin.query(
+        "UPDATE lockd.subscription_invoices SET created_at=now()-interval '20 days',due_at=(SELECT ends_at FROM lockd.subscriptions WHERE account_id=$2),renewal_for=(SELECT ends_at FROM lockd.subscriptions WHERE account_id=$2) WHERE id=$1",
+        [iid, x.dj.account],
+      );
+      await admin.query('ALTER TABLE lockd.subscription_invoices ENABLE TRIGGER invoice_history');
+      await admin.query('COMMIT');
+    } catch (e) {
+      await admin.query('ROLLBACK');
+      throw e;
+    }
+    expect((await billing.home(x.ctx))!.pro).toBe(false);
+    const cid = await billing.upload(x.ctx, iid, 'TIMELY-RENEWAL', 2500000, await png());
+    await billing.reconcile(x.staff.ctx, iid, {
+      ...invoiceDecision(cid, 2500000),
+      receivedAt: new Date(Date.now() - 2 * 86400000).toISOString(),
+    });
+    expect((await billing.home(x.ctx))!.pro).toBe(true);
+  });
+  it('keeps billing staff out of event contracts and receipts and removes access when disabled', async () => {
+    const x = await invoiceFixture(),
+      h = await claimed(x.dj);
+    expect(await s.booking(x.staff.ctx, h.id)).toBeNull();
+    expect(await s.receipt(x.staff.ctx, h.claim)).toBeUndefined();
+    expect((await billing.queue(x.staff.ctx)).invoices.some((i) => i.id === x.id)).toBe(true);
+    await admin.query('UPDATE lockd.billing_staff_members SET enabled=false WHERE user_id=$1', [
+      x.staff.uid,
+    ]);
+    expect(await billing.invoice(x.staff.ctx, x.id)).toBeNull();
+    await expect(billing.queue(x.staff.ctx)).rejects.toThrow(/MFA/);
+    for (const table of [
+      'subscription_invoices',
+      'subscription_claims',
+      'subscription_payments',
+      'subscriptions',
+      'subscription_grants',
+      'founding_memberships',
+      'founding_approvals',
+      'billing_events',
+    ])
+      await expect(
+        transaction(x.ctx, (c) => c.query(`DELETE FROM lockd.${table}`)),
+      ).rejects.toMatchObject({ code: '42501' });
+  });
+  it('rechecks staff MFA after waiting for the tenant lock', async () => {
+    const x = await invoiceFixture();
+    await admin.query('BEGIN');
+    await admin.query('SELECT id FROM lockd.accounts WHERE id=$1 FOR UPDATE', [x.dj.account]);
+    await admin.query(
+      "UPDATE lockd.billing_staff_sessions SET expires_at=clock_timestamp()+interval '50 milliseconds' WHERE user_id=$1",
+      [x.staff.uid],
+    );
+    const pending = billing.reconcile(x.staff.ctx, x.id, invoiceDecision(x.claim)).then(
+      () => null,
+      (e: Error & { code?: string }) => e,
+    );
+    await admin.query('SELECT pg_sleep(0.2)');
+    await admin.query('COMMIT');
+    expect(await pending).toMatchObject({ code: '42501' });
+    expect((await billing.invoice(x.ctx, x.id))!.verified_minor).toBe(0);
+  });
+  it('rate limits authenticator replays per staff account', async () => {
+    const staff = await reviewer(),
+      code = staff.code;
+    for (let n = 0; n < 5; n++)
+      await expect(billing.stepUp(staff.ctx, { code })).rejects.toThrow(/already used/);
+    await expect(billing.stepUp(staff.ctx, { code })).rejects.toThrow(/Too many/);
+  });
+  it('records a late founding renewal as unapplied funds and does not silently substitute a standard plan', async () => {
+    const x = await invoiceFixture('founding');
+    await billing.reconcile(x.staff.ctx, x.id, invoiceDecision(x.claim, x.amount));
+    await moveSubscriptionEnd(x.dj.account, -6);
+    const iid = await billing.issue(x.ctx, {
+      plan: 'founding',
+      billingName: 'Late founding renewal',
+      billingEmail: x.dj.email,
+      requestId: randomUUID(),
+    });
+    await admin.query('BEGIN');
+    try {
+      await admin.query('ALTER TABLE lockd.subscription_invoices DISABLE TRIGGER invoice_history');
+      await admin.query(
+        "UPDATE lockd.subscriptions SET starts_at=now()-interval '1 year',ends_at=now()-interval '8 days' WHERE account_id=$1",
+        [x.dj.account],
+      );
+      await admin.query(
+        "UPDATE lockd.subscription_invoices SET created_at=now()-interval '20 days',due_at=(SELECT ends_at FROM lockd.subscriptions WHERE account_id=$2),renewal_for=(SELECT ends_at FROM lockd.subscriptions WHERE account_id=$2) WHERE id=$1",
+        [iid, x.dj.account],
+      );
+      await admin.query('ALTER TABLE lockd.subscription_invoices ENABLE TRIGGER invoice_history');
+      await admin.query('COMMIT');
+    } catch (e) {
+      await admin.query('ROLLBACK');
+      throw e;
+    }
+    const cid = await billing.upload(x.ctx, iid, 'LATE-FOUNDING-RENEWAL', 2500000, await png());
+    expect(await billing.reconcile(x.staff.ctx, iid, invoiceDecision(cid, 2500000))).toBe(
+      'requires_resolution',
+    );
+    const h = (await billing.home(x.ctx))!;
+    expect(h.pro).toBe(false);
+    expect(h.subscription!.plan).toBe('founding');
+    expect((await billing.invoice(x.ctx, iid))!.verified_minor).toBe(2500000);
+    expect(
+      (await admin.query('SELECT * FROM lockd.subscription_grants WHERE invoice_id=$1', [iid]))
+        .rowCount,
+    ).toBe(0);
+  });
+  it('serializes the final founding place and records the other payment for resolution without granting access', async () => {
+    const staff = await reviewer();
+    await enableBilling();
+    const prepare = async () => {
+      const dj = await fixture(),
+        ctx = { session: dj.session };
+      await billing.approve(staff.ctx, {
+        accountId: dj.account,
+        reason: 'Synthetic Jamaican DJ cohort eligibility',
+        attest: true,
+      });
+      const id = await billing.issue(ctx, {
+        plan: 'founding',
+        billingName: 'Synthetic Cohort DJ',
+        billingEmail: dj.email,
+        requestId: randomUUID(),
+      });
+      const claim = await billing.upload(ctx, id, 'SYNTHETIC-COHORT', 2500000, await png());
+      return { dj, ctx, id, claim };
+    };
+    let count = Number(
+      (await admin.query('SELECT count(*) FROM lockd.founding_memberships')).rows[0].count,
+    );
+    while (count < 49) {
+      const x = await prepare();
+      await billing.reconcile(staff.ctx, x.id, invoiceDecision(x.claim, 2500000));
+      count++;
+    }
+    const a = await prepare(),
+      b = await prepare();
+    const states = await Promise.all([
+      billing.reconcile(staff.ctx, a.id, invoiceDecision(a.claim, 2500000)),
+      billing.reconcile(staff.ctx, b.id, invoiceDecision(b.claim, 2500000)),
+    ]);
+    expect(states.sort()).toEqual(['paid', 'requires_resolution']);
+    expect(
+      Number((await admin.query('SELECT count(*) FROM lockd.founding_memberships')).rows[0].count),
+    ).toBe(50);
+    const homes = await Promise.all([billing.home(a.ctx), billing.home(b.ctx)]);
+    expect(homes.filter((h) => h!.pro)).toHaveLength(1);
+    const rejected = states;
+    expect(rejected).toContain('requires_resolution');
+    const outsider = await fixture();
+    await billing.approve(staff.ctx, {
+      accountId: outsider.account,
+      reason: 'Synthetic cohort already full test',
+      attest: true,
+    });
+    await expect(
+      billing.issue(
+        { session: outsider.session },
+        {
+          plan: 'founding',
+          billingName: 'No place left',
+          billingEmail: outsider.email,
+          requestId: randomUUID(),
+        },
+      ),
+    ).rejects.toThrow(/cohort is full/);
   });
 });

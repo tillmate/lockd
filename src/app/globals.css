@@ -916,3 +916,32 @@ summary {
 .booking-detail .card > .note .fine {
   overflow-wrap: anywhere;
 }
+fieldset {
+  border: 0;
+  padding: 0;
+  min-width: 0;
+}
+.plan-option {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 18px;
+  cursor: pointer;
+}
+.plan-option.selected {
+  background: #fff0cf;
+}
+.plan-option input {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+}
+.plan-option span {
+  display: block;
+}
+.plan-option:has(input:disabled) {
+  opacity: 0.6;
+  cursor: default;
+}

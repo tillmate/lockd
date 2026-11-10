@@ -33,6 +33,18 @@ Open [local Lockd](http://127.0.0.1:3100). Optionally run `npm run worker` in a 
 8. On a confirmed booking at least 14 days away, propose a complimentary date change. Accept the exact amendment in both client and DJ views. The original date stays reserved until both accept and the proposed date is still available.
 9. Request cancellation from the client view and review it as the DJ, including the refund basis. Approval releases the date. With synthetic data only, record a refund attestation as DJ and separately acknowledge receipt as client. These actions record statements; they never transfer funds.
 
+### Local software billing demonstration
+
+Collection defaults disabled. To exercise billing locally, register and verify a separate synthetic reviewer, then run:
+
+```sh
+npm run billing:local -- reviewer@example.test
+```
+
+This command only accepts a loopback database in explicit local mode and a synthetic `example.test` identity. It enables clearly labeled test collection instructions with **no bank account details**, grants only billing-review authority, and writes a private authenticator enrollment URI/key under ignored `.local/`. Enroll it in an authenticator, sign in as that reviewer, and visit `/staff/billing`. Enter the current code to unlock review for ten minutes. Keep enrollment files and the generated `STAFF_MFA_KEY` private. The script never outputs the secret to logs.
+
+As a different DJ, choose **Subscription** from the dashboard and request a monthly/annual invoice, or obtain staff founding eligibility approval before selecting Founding. Upload synthetic evidence. Paid access remains inactive until the independent reviewer verifies the actual bank receipt in the synthetic test. The review records a statement and never calls a bank. Founder allocation occurs only after full verification; receipt timing controls the seven-day renewal rule. See ADR 009/010 for exact behavior and exception limits. Production staff/bank configuration requires a separately approved release; do not repurpose this test setup for live collection.
+
 All mailbox messages stay on disk. No email or financial provider is connected. Test links are fragment-based and removed from browser history when exchanged for an HttpOnly cookie. Do not share them publicly.
 
 ## Verification
@@ -65,7 +77,7 @@ Read [implementation status](IMPLEMENTATION_STATUS.md), [architecture decisions]
 
 ## Scope and launch gates
 
-This slice supports one editable service per DJ, personal availability blocks, the three-active Free cap, partial/rejected evidence, duplicate detection, late-payment exceptions, completion, upcoming-booking cancellation, direct-refund records and one eligible date amendment with both signatures. Paid subscriptions, founding-seat allocation, staff MFA/admin, reviewed legal terms, verified listing moderation, retention operations, external messaging and production hosting remain separate milestones. No invented bank instructions, paid entitlements, reviews or ratings are shipped. See architecture decisions for amendment eligibility, refund defaults, conservative deadlines and unsupported dispute/expired-fund cases.
+This slice supports one editable service per DJ, availability blocks, Free/paid access enforcement, partial/rejected evidence, late-payment exceptions, completion, upcoming-booking cancellation, direct-refund records and one eligible date amendment with both signatures. Software billing supports manual JMD invoices, private evidence, scoped staff MFA/reconciliation, first-50 founding allocation and seven-day grace. Wider admin/moderation/privacy operations, reviewed legal terms, live business-bank configuration, tax invoice export, retention, external messaging and production hosting remain separate milestones. No invented live bank instructions, reviews or ratings are shipped. See architecture decisions for exact eligibility, refund defaults, conservative deadlines and unresolved billing/dispute cases.
 
 The Figma source was inspected through MCP. The application adapts the approved ivory/gold visual language and real booking steps to responsive HTML; it is not a pixel-for-pixel reconstruction of all design frames. Static logo is sourced from Figma; Inter is bundled locally via Fontsource. The initial audit found no existing application and the owner confirmed a new repository was needed.
 

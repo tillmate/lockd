@@ -71,8 +71,9 @@ export function Submit({ busy, children }: { busy: boolean; children: ReactNode 
 }
 const val = (d: FormData, key: string) => String(d.get(key) ?? '');
 export const jamaicaISO = (s: string) => {
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(s)) throw new Error('Choose a valid date and time');
-  return `${s}:00-05:00`;
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(s))
+    throw new Error('Choose a valid date and time');
+  return `${s.length === 16 ? `${s}:00` : s}-05:00`;
 };
 export function AuthForm({ mode }: { mode: 'register' | 'login' }) {
   const [busy, setBusy] = useState(false),
@@ -264,7 +265,7 @@ export function OnboardForm({ initial }: { initial?: Settings }) {
         <Field
           label="Booking page address"
           name="slug"
-          pattern="[a-z0-9][a-z0-9-]{2,49}"
+          pattern="[a-z0-9](?:[a-z0-9]|-){2,49}"
           placeholder="your-dj-name"
           defaultValue={initial?.slug}
           readOnly={!!initial}

@@ -1,6 +1,6 @@
 # Lockd implementation status
 
-## Current milestone — profile editing, cancellation and date amendments
+## Current milestone — manual software invoices, founding allocation and billing staff MFA
 
 **Implemented locally with real PostgreSQL persistence. Not production-ready or deployed.** The browser workflow is connected end to end; no payment gateway or external money movement exists. All demonstrations use visibly labeled synthetic accounts, terms, receipts and attestations.
 
@@ -18,9 +18,9 @@
 | Completed event | EXISTS | Owning DJ may complete ended confirmed events, idempotently; review invitation workflow is missing. |
 | Multi-tenant authorization and private files | EXISTS | RLS, restricted runtime role, server-only functions, guest capability reads, private attachment downloads. |
 | Local/CI test tooling | EXISTS | `scripts/local-db.ts`, migration ledger, `tests/booking.test.ts`, Playwright browser test and GitHub Actions. Fresh Linux/PostgreSQL CI passed. |
-| Subscriptions / manual invoices / founding seats | MISSING | All accounts currently Free; no self-service Pro bypass, invoice collection or bank data invented. |
+| Subscriptions / manual invoices / founding seats | EXISTS locally | Exact monthly/annual/founding invoices, private evidence, actual-receipt reconciliation, renewal grace, backend paid-access cap, transactional first-50 allocation. Collection disabled by default; synthetic adapter only. Live bank/tax particulars and exception resolution remain blocked. |
 | Cancellations / refunds / reschedules | EXISTS locally / bounded scope | `db/006_booking_changes.sql`, `booking-changes.tsx`: client request/DJ decision, refund obligation/transfer attestation/client receipt, two-party immutable date amendments. Upcoming active bookings only; expired-fund resolution, disputes and installments remain missing. |
-| Staff RBAC/MFA / moderation / privacy operations | MISSING | Launch blocker; no public staff route or fabricated admin controls. |
+| Staff RBAC/MFA / moderation / privacy operations | PARTIAL | Billing-only role with encrypted TOTP, replay/rate protection, 10-minute step-up, independent reconciliation and immutable audit. No event-document access. Wider admin/moderation/privacy and production provisioning/recovery remain missing. |
 | External messaging / real bank / legal/privacy approvals | BLOCKED | Requires authorized configuration and owner/legal decisions. |
 | Production application deployment | NOT PERFORMED | Explicitly outside authorization. Public Git repository is source sharing only. |
 
@@ -32,6 +32,11 @@
 - `db/004_creation_clock.sql`: holds start when allocated after locks; audit and verification timestamps use actual clock.
 - `db/005_token_purposes.sql`: single-purpose auth tokens and safe re-request of verification.
 - `db/006_booking_changes.sql`: profile revision/audit, agreement versioning, two-party amendments, cancellation/refund records, RLS and narrow authenticated functions; preserves existing data.
+- `db/007_subscriptions.sql`: separate billing ledgers, staff scopes, invoice snapshots, actual-receipt reconciliation, paid access and founding allocation; extends the existing hold cap without replacing booking behavior.
+- `db/008_bank_timestamp_precision.sql`: compares manually entered bank timestamps at their second precision.
+- `db/009_staff_audit.sql`: MFA-success audit and freshness recheck after eligibility-review lock waits.
+- `src/lib/billing.ts`, `src/lib/mfa.ts`, `src/components/billing.tsx`, `/dashboard/billing`, `/staff/billing`: full manual subscription journey and constrained review UI.
+- `scripts/local-billing.ts`: loopback/synthetic-only test collection and staff enrollment; no real bank or role deployment.
 - `src/lib/{db,auth,service,validation,http,format}.ts`: persistence, identity, image validation, server validation, request protection and presentation.
 - `src/app/` and `src/components/`: public discovery/profile, onboarding, auth/recovery, private client booking, DJ review and availability blocks.
 - `scripts/`: local PostgreSQL launcher, local-only atomic migrations, expiry worker.
@@ -40,9 +45,17 @@
 
 ## Current verification evidence
 
+- **57 real PostgreSQL tests passed**. Added RFC TOTP vectors, replay/rate/MFA expiry and lock-wait checks, disabled collection, exact prices, immutable invoice/receipt history, tenant isolation, self-review denial, proof/partial/rejected payment separation, actual paid access, seven-day downgrade without record loss, timely versus late founder renewal and competing final-place allocations.
+- **Both browser journeys passed (46.6s total)**: original booking/edit/amendment/cancellation/refund flow and a separate software subscription flow with independent founder approval, staff authenticator, invoice evidence, no Pro from proof, actual receipt attestation and allocated founding access. All six target viewport widths pass; the billing journey asserts no browser errors.
+- `npm run typecheck`, `npm run lint` and optimized `npm run build` passed with **19 routes**. `npm audit --audit-level=moderate`: **0 vulnerabilities**. GitHub CI will independently check this published revision on fresh Linux/PostgreSQL.
+- Figma MCP inspected BILL01 `81:108`, BILL02 `81:144` and BILL04 `81:208`: plan-specific invoices, manual collection, actual reconciliation and renewal grace. Existing responsive components and static brand assets are reused.
+- New synthetic evidence: `subscription-plan-desktop.png`, `subscription-paid-mobile.png`, `billing-review-desktop.png` in `docs/evidence/`. No authenticator secret, private access link or live bank details are included.
+
+## Booking-change milestone verification
+
 - Local database suite: **42 integration tests** covering the original slice plus settings isolation/stale writes, original snapshot preservation, two-party hash acceptance, simultaneous signatures, target-date collision rollback, amendment eligibility/expiry, cancellation outcomes, refund attestations and new-table RLS/immutability.
 - Full browser journey extended through profile editing, amendment proposal/client signature/DJ signature, cancellation request/approval, DJ refund attestation and client acknowledgement. Original agreement hash, original booked price and historical verified deposit remain unchanged. Final local run: **1 passed, 20.1s**, with refreshed screenshots and all six viewport checks.
-- Typecheck and lint passed. Optimized build passed with **15 routes**, and dependency audit reports **0 vulnerabilities**. Final revision is being rechecked in local and GitHub CI.
+- Typecheck and lint passed. Optimized build passed with **15 routes**, and dependency audit reports **0 vulnerabilities**. **GitHub CI passed** on implementation commit `50d565b`: https://github.com/tillmate/lockd/actions/runs/42750942096, including all 42 database tests and the extended browser journey on fresh Linux/PostgreSQL.
 - Figma MCP inspected BEX09 `80:322` and BEX10 `85:2`: exact amendment acceptance, preserved prior agreement, original reservation until approval and DJ-managed cancellation/refund status. Responsive application uses persisted data rather than illustrative Figma values.
 - New synthetic evidence: `docs/evidence/amended-mobile.png`, `cancelled-refund-mobile.png`, `cancelled-refund-desktop.png`. No private bearer links are shown.
 
@@ -64,7 +77,9 @@
 
 ## Remaining dependencies and next slice
 
-The next product slice is **manual subscription invoice reconciliation and founding allocation**, with scoped privileged review and no invented collection details or paid entitlement bypass. Verified Lockd business bank details and authorized staff identity/MFA are still needed before live collection. Existing booking functionality remains available on Free.
+The next product slice is **audited billing-exception resolution and operational listing/support controls**, with case-scoped access and production readiness. Verified Lockd business bank details, legal/tax invoice particulars and authorized production staff provisioning are still needed before live collection. External email delivery, backup/restore, retention and stronger anonymous abuse prevention remain launch blockers. Existing bookings remain accessible after paid access lapses.
+
+Current billing limits: one outstanding invoice, same-plan renewal requested from 15 days before the due date, no automatic collection or reminder delivery, no mid-term plan change/proration, no overpayment or invoice-refund resolution automation. Full verified payments that cannot receive a founding place/rate are preserved as `requires_resolution` without a silent substitute plan. Settlement totals are software receipts, separate from event deposits and accounting revenue recognition. Production MFA recovery and broad admin access are not implemented. See ADR 009/010 and the local billing runbook.
 
 Current change limits: complimentary amendments keep venue/service/price fixed, expire after 48 hours, and reserve no target slot until both signatures. Interpret within 90 days relative to the original date, in either direction. Client cancellation refund defaults are suggestions pending legal validation; explicit DJ contract/legal basis is required. DJ cancellation enforces 100% return of actual verified funds. Positive refunds use a conservative seven-calendar-day deadline, within seven business days. No external funds or messages move. See ADR 007/008 for the full rationale and remaining dispute/expired-booking cases.
 

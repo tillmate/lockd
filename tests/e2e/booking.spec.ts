@@ -2,6 +2,8 @@ import { test, expect, type Page } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import { mkdir } from 'node:fs/promises';
+import { provisionLocalBilling } from '../../scripts/local-billing';
+import { totp } from '../../src/lib/mfa';
 
 const password = 'Synthetic-test-password-42!';
 async function setupDJ(page: Page, label: string) {
@@ -26,7 +28,8 @@ async function setupDJ(page: Page, label: string) {
   await page.getByLabel('Password', { exact: true }).fill(password);
   await page.getByRole('button', { name: 'Sign in', exact: false }).click();
   await expect(page).toHaveURL(/onboarding/);
-  await page.getByLabel('Stage name', { exact: true }).fill(`TEST DJ ${label.toUpperCase()}`);
+  const stageName = `TEST DJ ${label.toUpperCase()} ${suffix}`;
+  await page.getByLabel('Stage name', { exact: true }).fill(stageName);
   await page.getByLabel('Booking page address').fill(slug);
   await page
     .getByLabel('About your sound')
@@ -49,7 +52,7 @@ async function setupDJ(page: Page, label: string) {
     );
   await page.getByRole('button', { name: 'Publish my local booking page' }).click();
   await expect(page).toHaveURL(/dashboard$/);
-  return { email, slug };
+  return { email, slug, stageName };
 }
 test('complete browser journey with two isolated DJs and an account-free client', async ({
   browser,
@@ -72,9 +75,17 @@ test('complete browser journey with two isolated DJs and an account-free client'
     );
   }
   await mkdir('docs/evidence', { recursive: true });
-  await cp.screenshot({ path: 'docs/evidence/public-dj-desktop.png', fullPage: true });
+  await cp.screenshot({
+    path: 'docs/evidence/public-dj-desktop.png',
+    fullPage: true,
+    caret: 'initial',
+  });
   await cp.setViewportSize({ width: 390, height: 844 });
-  await cp.screenshot({ path: 'docs/evidence/public-dj-mobile.png', fullPage: true });
+  await cp.screenshot({
+    path: 'docs/evidence/public-dj-mobile.png',
+    fullPage: true,
+    caret: 'initial',
+  });
   const date = new Date(Date.now() + 45 * 86400000).toISOString().slice(0, 10);
   await cp.getByLabel('Event start (Jamaica time)').fill(`${date}T20:00`);
   await cp.getByLabel('Your full name').fill('Synthetic Client');
@@ -129,8 +140,16 @@ test('complete browser journey with two isolated DJs and an account-free client'
   await expect(page.getByRole('heading', { name: 'Your booking is confirmed.' })).toBeVisible();
   await cp.reload();
   await expect(cp.getByRole('heading', { name: 'Your booking is confirmed.' })).toBeVisible();
-  await cp.screenshot({ path: 'docs/evidence/confirmed-mobile.png', fullPage: true });
-  await page.screenshot({ path: 'docs/evidence/dj-verified-desktop.png', fullPage: true });
+  await cp.screenshot({
+    path: 'docs/evidence/confirmed-mobile.png',
+    fullPage: true,
+    caret: 'initial',
+  });
+  await page.screenshot({
+    path: 'docs/evidence/dj-verified-desktop.png',
+    fullPage: true,
+    caret: 'initial',
+  });
   const confirmed = await (await cp.request.get(`/api/bookings/${id}`)).json();
   expect(confirmed.status).toBe('CONFIRMED_LOCKD');
   expect(confirmed.verified_minor).toBe(2750000);
@@ -179,7 +198,11 @@ test('complete browser journey with two isolated DJs and an account-free client'
   expect(amended.agreements[0].content_hash).toBe(confirmed.agreement.content_hash);
   expect(amended.price_minor).toBe(5500000);
   expect(amended.starts_at).not.toBe(confirmed.starts_at);
-  await cp.screenshot({ path: 'docs/evidence/amended-mobile.png', fullPage: true });
+  await cp.screenshot({
+    path: 'docs/evidence/amended-mobile.png',
+    fullPage: true,
+    caret: 'initial',
+  });
   await cp.getByText('Request cancellation', { exact: true }).click();
   await cp
     .getByLabel('Reason for cancellation request')
@@ -211,9 +234,17 @@ test('complete browser journey with two isolated DJs and an account-free client'
   await expect(
     cp.getByText('Client acknowledged actual receipt on', { exact: false }),
   ).toBeVisible();
-  await cp.screenshot({ path: 'docs/evidence/cancelled-refund-mobile.png', fullPage: true });
+  await cp.screenshot({
+    path: 'docs/evidence/cancelled-refund-mobile.png',
+    fullPage: true,
+    caret: 'initial',
+  });
   await page.reload();
-  await page.screenshot({ path: 'docs/evidence/cancelled-refund-desktop.png', fullPage: true });
+  await page.screenshot({
+    path: 'docs/evidence/cancelled-refund-desktop.png',
+    fullPage: true,
+    caret: 'initial',
+  });
   const cancelled = await (await cp.request.get(`/api/bookings/${id}`)).json();
   expect(cancelled.status).toBe('CANCELLED');
   expect(cancelled.verified_minor).toBe(2750000);
@@ -232,4 +263,121 @@ test('complete browser journey with two isolated DJs and an account-free client'
   expect(errors).toEqual([]);
   await other.close();
   await client.close();
+});
+
+test('manual subscription invoice requires scoped staff MFA and actual reconciliation before paid access', async ({
+  browser,
+  page,
+}) => {
+  const browserErrors: string[] = [];
+  page.on('pageerror', (e) => browserErrors.push(e.message));
+  page.on('console', (m) => {
+    if (m.type() === 'error') browserErrors.push(m.text());
+  });
+  const dj = await setupDJ(page, 'subscriber');
+  const staffContext = await browser.newContext(),
+    sp = await staffContext.newPage();
+  sp.on('pageerror', (e) => browserErrors.push(e.message));
+  sp.on('console', (m) => {
+    if (m.type() === 'error') browserErrors.push(m.text());
+  });
+  const staff = await setupDJ(sp, 'billing-reviewer');
+  const enrollment = await provisionLocalBilling(staff.email);
+  await sp.goto('/staff/billing');
+  await expect(sp.getByRole('heading', { name: 'Verify it’s you.' })).toBeVisible();
+  await sp.getByLabel('Authenticator code').fill(totp(enrollment.secret));
+  await sp.getByRole('button', { name: 'Unlock billing review' }).click();
+  await expect(sp.getByRole('heading', { name: 'Reconcile with confidence.' })).toBeVisible();
+  const accountCard = sp
+    .getByRole('article')
+    .filter({ has: sp.getByRole('heading', { name: dj.stageName, exact: true }) });
+  await accountCard.getByText('Review founding eligibility', { exact: true }).click();
+  await accountCard
+    .getByLabel('Eligibility review reason')
+    .fill('Synthetic independent Jamaican DJ review. Browser QA only.');
+  await accountCard.getByLabel('I independently reviewed this Jamaican DJ’s eligibility.').check();
+  await accountCard.getByRole('button', { name: 'Approve founding eligibility' }).click();
+  await expect(accountCard.getByText('Kingston · Eligibility approved')).toBeVisible();
+  await page.goto('/dashboard/billing');
+  await page.getByRole('radio', { name: /Founding DJ/ }).check();
+  await page.getByLabel('Business billing name').fill('Synthetic subscription business');
+  await page.getByLabel('Billing email').fill(dj.email);
+  await page.screenshot({
+    path: 'docs/evidence/subscription-plan-desktop.png',
+    fullPage: true,
+    caret: 'initial',
+  });
+  await page.getByRole('button', { name: 'Create manual JMD invoice' }).click();
+  await expect(page.getByRole('heading', { name: 'Review your subscription.' })).toBeVisible();
+  const id = page.url().split('/').at(-1)!;
+  const invoice = await (await page.request.get(`/api/invoices/${id}`)).json();
+  expect(invoice.amount_minor).toBe(2500000);
+  expect(invoice.state).toBe('open');
+  expect(invoice.instructions).toContain('TEST ONLY');
+  const guest = await browser.newContext();
+  const outsider = await guest.newPage();
+  expect((await outsider.request.get(`/api/invoices/${id}`)).status()).toBe(404);
+  const image = await sharp({
+    create: { width: 160, height: 100, channels: 3, background: '#e4deb0' },
+  })
+    .png()
+    .toBuffer();
+  await page.getByLabel('Subscription payment reference').fill('TEST-SOFTWARE-PAYMENT');
+  await page.getByLabel('Subscription amount sent (JMD)').fill('25000');
+  await page.getByLabel('Subscription receipt image').setInputFiles({
+    name: 'synthetic-software-receipt.png',
+    mimeType: 'image/png',
+    buffer: image,
+  });
+  await page.getByRole('button', { name: 'Submit subscription evidence' }).click();
+  await expect(page.getByText('Claimed J$25,000.00 · Awaiting staff review')).toBeVisible();
+  const before = await (await page.request.get(`/api/invoices/${id}`)).json();
+  expect(before.verified_minor).toBe(0);
+  expect(
+    (await outsider.request.get(`/api/invoice-receipts/${before.claims[0].id}`)).status(),
+  ).toBe(404);
+  await page.goto('/dashboard/billing');
+  await expect(page.getByText('Free access', { exact: true })).toBeVisible();
+  await sp.goto(`/staff/billing/invoices/${id}`);
+  await sp.getByLabel('Actual subscription funds received (JMD)').fill('25000');
+  await sp
+    .getByLabel('Business-bank transaction reference')
+    .fill(`TEST-SOFTWARE-BANK-${randomUUID()}`);
+  await expect
+    .poll(() => Date.now())
+    .toBeGreaterThan(new Date(invoice.created_at).getTime() + 1000);
+  await sp
+    .getByLabel('Bank received at (Jamaica time)')
+    .fill(new Date(Date.now() - 5 * 3600000).toISOString().slice(0, 19));
+  await sp.getByLabel('I checked Lockd’s business-bank record').check();
+  await sp
+    .getByLabel('Subscription reconciliation reason')
+    .fill('Synthetic bank reconciliation. No real funds moved.');
+  await sp.getByRole('button', { name: 'Record subscription reconciliation' }).click();
+  await expect(sp.getByRole('heading', { name: 'Invoice reconciled.' })).toBeVisible();
+  await page.reload();
+  await expect(page.getByText('Pro access active', { exact: true })).toBeVisible();
+  await expect(page.getByText(/Founding allocation #/)).toBeVisible();
+  await page.goto(`/dashboard/billing/${id}`);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({
+    path: 'docs/evidence/subscription-paid-mobile.png',
+    fullPage: true,
+    caret: 'initial',
+  });
+  for (const width of [320, 360, 390, 768, 1024, 1440]) {
+    await page.setViewportSize({ width, height: 1000 });
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
+  }
+  await sp.goto('/staff/billing');
+  await sp.screenshot({
+    path: 'docs/evidence/billing-review-desktop.png',
+    fullPage: true,
+    caret: 'initial',
+  });
+  await guest.close();
+  await staffContext.close();
+  expect(browserErrors).toEqual([]);
 });

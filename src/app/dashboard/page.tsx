@@ -26,13 +26,19 @@ export default async function Page() {
           <Link className="secondary" href="/dashboard/settings">
             Edit profile & package
           </Link>{' '}
+          <Link className="secondary" href="/dashboard/billing">
+            Subscription
+          </Link>{' '}
           <Logout />
         </div>
       </div>
       <div className="stats">
         <div>
-          <span>Free plan</span>
-          <strong>{active.length} / 3</strong>
+          <span>{d.pro ? 'Pro access' : 'Free plan'}</span>
+          <strong>
+            {active.length}
+            {d.pro ? '' : ' / 3'}
+          </strong>
           <p>Active bookings</p>
         </div>
         <div>
