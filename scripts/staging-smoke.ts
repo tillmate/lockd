@@ -19,12 +19,7 @@ await as(runtimeDatabaseUrl(), async (c) => {
   const slugs = (
     (await c.query('SELECT lockd.public_profiles() AS p')).rows[0].p as { slug: string }[]
   ).map((p) => p.slug);
-  for (const slug of [
-    'demo-selecta-ruby',
-    'demo-dj-blaze',
-    'demo-island-vibes',
-    'demo-your-business',
-  ])
+  for (const slug of ['jordan-p', 'leah-m', 'andre-j', 'tasha-k', 'demo-your-business'])
     if (!slugs.includes(slug)) throw new Error(`Demo listing ${slug} is missing`);
   const denied = await c.query('SELECT 1 FROM lockd.users').then(
     () => false,

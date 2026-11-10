@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { profiles } from '@/lib/service';
 import { money } from '@/lib/format';
+import { demoHero, demoMode, demoProfile, demoProfiles } from '@/lib/demo';
 // Landing page after Figma "14 · Public Website — Light & Minimal" (WEB 01 / Landing). Figma's
 // sample people, photos and star ratings are illustrative: only real, approved DJs appear here,
 // and ratings stay hidden until verified reviews exist.
@@ -43,6 +44,13 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ q
         ),
       )
     : all;
+  // On the staging demo the illustrative Figma creatives lead the list.
+  const demo = demoMode();
+  const order = (slug: string) => {
+    const i = Object.keys(demoProfiles).indexOf(slug);
+    return i < 0 ? 99 : i;
+  };
+  const shown = demo ? [...djs].sort((a, b) => order(a.slug) - order(b.slug)) : djs;
   return (
     <div className="lp">
       <section className="lp-hero">
@@ -74,11 +82,20 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ q
           </p>
         </div>
         <figure className="lp-hero-visual">
-          <div className="lp-visual-card" aria-hidden="true">
-            <span className="lp-visual-pill">Confirmed · Lockd</span>
-            <strong>Date, Lockd.</strong>
-            <p>Deposit verified by your DJ. Agreement signed. Your night is set.</p>
-          </div>
+          {demo ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              className="lp-hero-photo"
+              src={demoHero}
+              alt="Guests celebrating at an outdoor wedding reception by the sea"
+            />
+          ) : (
+            <div className="lp-visual-card" aria-hidden="true">
+              <span className="lp-visual-pill">Confirmed · Lockd</span>
+              <strong>Date, Lockd.</strong>
+              <p>Deposit verified by your DJ. Agreement signed. Your night is set.</p>
+            </div>
+          )}
           <figcaption>THE PERFECT MATCH, FOR EVERY MOMENT</figcaption>
         </figure>
       </section>
@@ -116,7 +133,11 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ q
         <div className="lp-heading">
           <div>
             <h2>{term ? `Results for “${q.trim()}”` : 'Featured creatives'}</h2>
-            <p>DJs you can book on Lockd today.</p>
+            <p>
+              {demo
+                ? 'Featured DJ profiles and invited-creator previews.'
+                : 'DJs you can book on Lockd today.'}
+            </p>
           </div>
           {term && (
             <Link className="lp-link" href="/#creatives">
@@ -126,33 +147,45 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ q
         </div>
         {djs.length ? (
           <div className="lp-creatives">
-            {djs.slice(0, term ? 24 : 8).map((d) => (
-              <Link key={d.id} href={`/dj/${d.slug}`} className="lp-creative">
-                <span className="lp-portrait" aria-hidden="true">
-                  {d.stageName
-                    .replace(/^DEMO · /, '')
-                    .split(/\s+/)
-                    .map((w) => w[0])
-                    .join('')
-                    .slice(0, 2)
-                    .toUpperCase()}
-                </span>
-                <span className="lp-creative-top">
-                  <strong>{d.stageName}</strong>
-                  <span className="lp-new">New to Lockd</span>
-                </span>
-                <span>{d.packages[0]?.name ?? 'DJ'}</span>
-                <span className="lp-creative-bottom">
-                  <span>{d.parish}, Jamaica</span>
-                  <span>
-                    {d.packages.length
-                      ? `from ${money(Math.min(...d.packages.map((p) => p.priceMinor)))}`
-                      : ''}{' '}
-                    · View →
+            {shown.slice(0, term ? 24 : demo ? 4 : 8).map((d) => {
+              const p = demoProfile(d.slug);
+              return (
+                <Link key={d.id} href={`/dj/${d.slug}`} className="lp-creative">
+                  {p ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img className="lp-portrait" src={p.photo} alt="" />
+                  ) : (
+                    <span className="lp-portrait" aria-hidden="true">
+                      {d.stageName
+                        .replace(/^DEMO · /, '')
+                        .split(/\s+/)
+                        .map((w) => w[0])
+                        .join('')
+                        .slice(0, 2)
+                        .toUpperCase()}
+                    </span>
+                  )}
+                  <span className="lp-creative-top">
+                    <strong>{d.stageName}</strong>
+                    {p ? (
+                      <span className="lp-rating">★ {p.rating}</span>
+                    ) : (
+                      <span className="lp-new">New to Lockd</span>
+                    )}
                   </span>
-                </span>
-              </Link>
-            ))}
+                  <span>{p?.role ?? d.packages[0]?.name ?? 'DJ'}</span>
+                  <span className="lp-creative-bottom">
+                    <span>{d.parish}, Jamaica</span>
+                    <span>
+                      {d.packages.length
+                        ? `from ${money(Math.min(...d.packages.map((p) => p.priceMinor)))}`
+                        : ''}{' '}
+                      · View →
+                    </span>
+                  </span>
+                </Link>
+              );
+            })}
           </div>
         ) : (
           <div className="empty">
@@ -163,7 +196,9 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ q
           </div>
         )}
         <p className="lp-fine">
-          Ratings appear only after three verified reviews of completed bookings.
+          {demo
+            ? 'Illustrative creative profiles and ratings for design only; live ratings require 3 eligible verified reviews.'
+            : 'Ratings appear only after three verified reviews of completed bookings.'}
         </p>
       </section>
 
