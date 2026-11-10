@@ -141,18 +141,19 @@ export function PlanPicker({ data }: { data: BillingHome }) {
     </div>
   );
 }
-export function StaffMFA() {
+export function StaffMFA({ area = 'billing' }: { area?: 'billing' | 'operations' }) {
   const router = useRouter();
   return (
     <div className="narrow card">
-      <p className="eyebrow">BILLING STAFF</p>
+      <p className="eyebrow">{area === 'billing' ? 'BILLING STAFF' : 'LOCKD STAFF'}</p>
       <h1>Verify it’s you.</h1>
       <p>
-        Use your authenticator to unlock billing review for ten minutes. Billing access does not
-        include clients’ booking agreements or DJ deposit evidence.
+        {area === 'billing'
+          ? 'Use your authenticator to unlock billing review for ten minutes. Billing access does not include clients’ booking agreements or DJ deposit evidence.'
+          : 'Use your authenticator to unlock staff tools for ten minutes. Every action is recorded with your reason. Staff tools never show clients’ agreements, receipts or private links.'}
       </p>
       <BillingForm
-        label="Unlock billing review"
+        label={area === 'billing' ? 'Unlock billing review' : 'Unlock staff tools'}
         run={async (d) => {
           await api('staff/mfa', { code: String(d.get('code')) });
           router.refresh();

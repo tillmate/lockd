@@ -15,6 +15,7 @@ import {
 } from '../src/lib/auth';
 import * as s from '../src/lib/service';
 import * as billing from '../src/lib/billing';
+import * as ops from '../src/lib/ops';
 import { base32, encryptSecret, totp, verifyTotp } from '../src/lib/mfa';
 import { moneyToMinor } from '../src/lib/validation';
 import { dispatch } from '../src/lib/notify/dispatcher';
@@ -1910,5 +1911,231 @@ describe('Transactional notifications', () => {
     ).toThrow(/https/);
     expect(() => deliveryConfig({ EMAIL_PROVIDER: 'local' })).toThrow(/local mode/);
     expect(deliveryConfig({}).transport).toBeNull();
+  });
+});
+
+const grantScope = (uid: string, scope: string) =>
+  admin.query(
+    "INSERT INTO lockd.staff_scopes(user_id,scope,reason) VALUES($1,$2,'Synthetic test scope grant')",
+    [uid, scope],
+  );
+const inDirectory = async (account: string) => (await s.profiles()).some((p) => p.id === account);
+const failAll = () =>
+  recorder(() => ({ ok: false, retry: false, error: 'Resend 422: invalid to' })).transport;
+
+describe('Super Admin operations', () => {
+  it('moderates listings: pending is bookable but unlisted, restriction hides and pauses new holds', async () => {
+    const f = await fixture(),
+      staff = await reviewer();
+    await grantScope(staff.uid, 'listings');
+    expect(await inDirectory(f.account)).toBe(false);
+    expect((await s.profiles(f.profile.slug))[0]?.id).toBe(f.account);
+    const existing = await held(f, 30);
+    expect(
+      (await ops.listings(staff.ctx, 'pending')).find((l) => l.id === f.account),
+    ).toMatchObject({ email: f.email, active_bookings: 1 });
+    await ops.reviewListing(staff.ctx, {
+      accountId: f.account,
+      decision: 'approved',
+      reasonCode: 'identity_checked',
+      note: 'Synthetic identity and stage name checked',
+    });
+    expect(await inDirectory(f.account)).toBe(true);
+    await ops.reviewListing(staff.ctx, {
+      accountId: f.account,
+      decision: 'restricted',
+      reasonCode: 'fraud_report',
+      note: 'Synthetic report of deposits taken without performing',
+    });
+    expect(await inDirectory(f.account)).toBe(false);
+    expect(await s.profiles(f.profile.slug)).toEqual([]);
+    await expect(s.createHold(input(f, 40))).rejects.toThrow(/not available/);
+    expect((await s.booking(existing.ctx, existing.id))?.status).toBe('AWAITING_SIGNATURE');
+    const dash = (await s.dashboard({ session: f.session }))!;
+    expect(dash.account.listing_state).toBe('restricted');
+    expect(dash.review?.note).toMatch(/deposits taken/);
+    const { sent, transport } = recorder();
+    await drain(transport);
+    const mail = sent.filter((m) => m.to === f.email && m.kind.startsWith('LISTING_'));
+    expect(mail.map((m) => m.kind).sort()).toEqual(['LISTING_APPROVED', 'LISTING_RESTRICTED']);
+    expect(mail.find((m) => m.kind === 'LISTING_RESTRICTED')!.text).toMatch(
+      /Reason: Synthetic report of deposits taken/,
+    );
+    await ops.reviewListing(staff.ctx, {
+      accountId: f.account,
+      decision: 'approved',
+      reasonCode: 'other',
+      note: 'Synthetic investigation closed, reinstated',
+    });
+    await drain(transport);
+    expect(sent.find((m) => m.to === f.email && m.subject.includes('active again'))).toBeTruthy();
+    expect(await s.createHold(input(f, 44))).toBeTruthy();
+    const history = await admin.query(
+      'SELECT from_state,to_state FROM lockd.listing_reviews WHERE account_id=$1 ORDER BY id',
+      [f.account],
+    );
+    expect(history.rows.map((r) => `${r.from_state}>${r.to_state}`)).toEqual([
+      'pending>approved',
+      'approved>restricted',
+      'restricted>approved',
+    ]);
+    await expect(
+      admin.query("UPDATE lockd.listing_reviews SET note='rewritten history' WHERE account_id=$1", [
+        f.account,
+      ]),
+    ).rejects.toThrow(/Immutable/);
+  });
+  it('requires the listings scope, fresh MFA, independence and matching reason codes', async () => {
+    const f = await fixture(),
+      billingOnly = await reviewer(),
+      staff = await reviewer();
+    await grantScope(staff.uid, 'listings');
+    const decision = {
+      accountId: f.account,
+      decision: 'approved',
+      reasonCode: 'identity_checked',
+      note: 'Synthetic eligibility review note',
+    };
+    await expect(ops.reviewListing(billingOnly.ctx, decision)).rejects.toMatchObject({
+      code: '42501',
+    });
+    await expect(ops.listings(billingOnly.ctx)).rejects.toMatchObject({ code: '42501' });
+    await expect(ops.listings({ session: f.session })).rejects.toMatchObject({ code: '42501' });
+    await expect(
+      ops.reviewListing(staff.ctx, { ...decision, accountId: staff.account }),
+    ).rejects.toMatchObject({ code: '42501' });
+    await expect(
+      ops.reviewListing(staff.ctx, { ...decision, reasonCode: 'fraud_report' }),
+    ).rejects.toThrow(/Reason code/);
+    await expect(
+      transaction(staff.ctx, (c) =>
+        c.query(
+          "SELECT lockd.review_listing($1,'approved','fraud_report','Bypassing the API layer')",
+          [f.account],
+        ),
+      ),
+    ).rejects.toThrow(/Reason code does not match/);
+    await admin.query(
+      "UPDATE lockd.billing_staff_sessions SET expires_at=now()-interval '1 second' WHERE user_id=$1",
+      [staff.uid],
+    );
+    await expect(ops.reviewListing(staff.ctx, decision)).rejects.toMatchObject({ code: '42501' });
+    for (const t of ['staff_scopes', 'staff_events', 'listing_reviews'])
+      await expect(
+        transaction(staff.ctx, (c) => c.query(`SELECT * FROM lockd.${t}`)),
+      ).rejects.toMatchObject({ code: '42501' });
+  });
+  it('shows masked delivery metadata and requeues failed messages once, with an audit record', async () => {
+    const staff = await reviewer();
+    await grantScope(staff.uid, 'notifications');
+    await drain(recorder().transport);
+    const f = await fixture(),
+      h = await held(f);
+    await drain(failAll());
+    const { messages, counts } = await ops.notifications(staff.ctx, 'failed');
+    expect(counts.failed).toBeGreaterThanOrEqual(2);
+    const requestId = (await rows(h.id)).find((r) => r.kind === 'booking_request')!.id;
+    const request = messages.find((m) => m.id === requestId)!;
+    expect(request).toMatchObject({ requeueable: true, stage_name: 'Synthetic DJ' });
+    expect(request.recipient).toMatch(/^d•••@example\.test$/);
+    expect(JSON.stringify(messages)).not.toContain(f.email);
+    expect(JSON.stringify(messages)).not.toContain(h.guest);
+    const verify = (
+      await admin.query("SELECT id FROM lockd.outbox WHERE recipient=$1 AND kind='verify'", [
+        f.email,
+      ])
+    ).rows[0];
+    expect(messages.find((m) => m.id === verify.id)?.requeueable).toBe(false);
+    await expect(
+      ops.requeue(staff.ctx, {
+        id: verify.id,
+        reasonCode: 'other',
+        note: 'Synthetic attempt to resend a link',
+      }),
+    ).rejects.toThrow(/cannot be resent/);
+    await ops.requeue(staff.ctx, {
+      id: requestId,
+      reasonCode: 'configuration_fixed',
+      note: 'Synthetic provider configuration corrected',
+    });
+    await expect(
+      ops.requeue(staff.ctx, {
+        id: requestId,
+        reasonCode: 'other',
+        note: 'Synthetic second requeue',
+      }),
+    ).rejects.toThrow(/Only failed/);
+    const { sent, transport } = recorder();
+    await drain(transport);
+    expect(sent.filter((m) => m.id === requestId)).toHaveLength(1);
+    expect((await rows(h.id)).find((r) => r.id === requestId)?.status).toBe('sent');
+    const audit = await admin.query(
+      "SELECT reason_code,actor_id FROM lockd.staff_events WHERE kind='NOTIFICATION_REQUEUED' AND subject_id=$1",
+      [requestId],
+    );
+    expect(audit.rows).toEqual([{ reason_code: 'configuration_fixed', actor_id: staff.uid }]);
+    // Staff cannot requeue messages about their own account.
+    await held(staff);
+    await drain(failAll());
+    const own = (
+      await admin.query(
+        "SELECT id FROM lockd.outbox WHERE account_id=$1 AND kind='booking_request' AND status='failed'",
+        [staff.account],
+      )
+    ).rows[0];
+    await expect(
+      ops.requeue(staff.ctx, {
+        id: own.id,
+        reasonCode: 'other',
+        note: 'Synthetic self-service attempt',
+      }),
+    ).rejects.toMatchObject({ code: '42501' });
+    await expect(ops.notifications((await reviewer()).ctx)).rejects.toMatchObject({
+      code: '42501',
+    });
+  });
+  it('lets only Super Admins change other staff scopes, records it, and unifies the audit trail', async () => {
+    const root = await reviewer(),
+      target = await reviewer(),
+      outsider = await fixture();
+    await grantScope(root.uid, 'admin');
+    await expect(ops.listings(target.ctx)).rejects.toMatchObject({ code: '42501' });
+    const change = {
+      userId: target.uid,
+      scope: 'listings',
+      grant: true,
+      note: 'Synthetic onboarding of a listings reviewer',
+    };
+    await ops.setScope(root.ctx, change);
+    await ops.setScope(root.ctx, change);
+    expect(Array.isArray(await ops.listings(target.ctx))).toBe(true);
+    await expect(ops.setScope(target.ctx, { ...change, userId: root.uid })).rejects.toMatchObject({
+      code: '42501',
+    });
+    await expect(ops.setScope(root.ctx, { ...change, userId: root.uid })).rejects.toMatchObject({
+      code: '42501',
+    });
+    const outsiderUser = (
+      await admin.query('SELECT user_id FROM lockd.accounts WHERE id=$1', [outsider.account])
+    ).rows[0].user_id;
+    await expect(ops.setScope(root.ctx, { ...change, userId: outsiderUser })).rejects.toThrow(
+      /enrolled staff/,
+    );
+    await ops.setScope(root.ctx, {
+      ...change,
+      grant: false,
+      note: 'Synthetic removal of listings scope',
+    });
+    await expect(ops.listings(target.ctx)).rejects.toMatchObject({ code: '42501' });
+    const { staff, audit } = await ops.directory(root.ctx);
+    expect(staff.find((m) => m.user_id === target.uid)?.scopes).toEqual([]);
+    const mine = audit.filter((e) => e.actor === root.email);
+    expect(mine.map((e) => e.kind)).toEqual(
+      expect.arrayContaining(['SCOPE_REVOKED', 'SCOPE_GRANTED', 'STAFF_MFA_VERIFIED']),
+    );
+    expect(mine.filter((e) => e.kind === 'SCOPE_GRANTED')).toHaveLength(1);
+    await expect(ops.directory(target.ctx)).rejects.toMatchObject({ code: '42501' });
+    expect(Array.isArray(await ops.listings(root.ctx, 'approved'))).toBe(true);
+    expect((await ops.notifications(root.ctx)).counts).toBeTruthy();
   });
 });

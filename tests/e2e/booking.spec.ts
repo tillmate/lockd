@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import { mkdir } from 'node:fs/promises';
 import { provisionLocalBilling } from '../../scripts/local-billing';
+import { grantLocalScopes } from '../../scripts/local-staff';
 import { totp } from '../../src/lib/mfa';
 
 const password = 'Synthetic-test-password-42!';
@@ -422,4 +423,87 @@ test('manual subscription invoice requires scoped staff MFA and actual reconcili
   await guest.close();
   await staffContext.close();
   expect(browserErrors).toEqual([]);
+});
+
+test('staff review a new listing for the directory, then restrict it with an audited reason', async ({
+  browser,
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  const dj = await setupDJ(page, 'listed');
+  await expect(page.getByRole('status').filter({ hasText: 'Listing under review.' })).toBeVisible();
+  const visitor = await browser.newContext();
+  const vp = await visitor.newPage();
+  await vp.goto('/');
+  await expect(vp.getByText(dj.stageName)).toHaveCount(0);
+  const staffContext = await browser.newContext(),
+    sp = await staffContext.newPage();
+  sp.on('pageerror', (e) => errors.push(e.message));
+  sp.on('console', (m) => {
+    if (m.type() === 'error') errors.push(m.text());
+  });
+  const staff = await setupDJ(sp, 'ops-staff');
+  const enrollment = await provisionLocalBilling(staff.email);
+  await grantLocalScopes(staff.email, ['listings', 'notifications']);
+  await sp.goto('/staff');
+  await expect(sp.getByRole('heading', { name: 'Verify it’s you.' })).toBeVisible();
+  await sp.getByLabel('Authenticator code').fill(totp(enrollment.secret));
+  await sp.getByRole('button', { name: 'Unlock staff tools' }).click();
+  await expect(sp.getByRole('heading', { name: 'Operations.' })).toBeVisible();
+  await sp.goto('/staff/admin');
+  await expect(sp.getByRole('heading', { name: 'Access and accountability.' })).toHaveCount(0);
+  await sp.goto('/staff/listings');
+  const card = sp.getByRole('article', { name: dj.stageName, exact: true });
+  await expect(card).toContainText(dj.email);
+  const approve = card.locator('form').filter({ hasText: 'Approve listing' });
+  await approve.getByLabel('Reason code').selectOption('identity_checked');
+  await approve.getByLabel('Review note').fill('Synthetic QA: stage name and contact checked.');
+  await approve.getByRole('button', { name: 'Approve listing' }).click();
+  await expect(card.getByRole('status')).toContainText('Listing approved.');
+  await vp.goto('/');
+  await expect(vp.getByText(dj.stageName).first()).toBeVisible();
+  await sp.goto('/staff/listings?state=approved');
+  const listed = sp.getByRole('article', { name: dj.stageName, exact: true });
+  await listed.getByLabel('Reason code').selectOption('fraud_report');
+  await listed
+    .getByLabel('Reason shown to the DJ')
+    .fill('Synthetic QA: simulated report for the moderation test.');
+  await listed.getByRole('button', { name: 'Restrict listing' }).click();
+  await expect(listed.getByRole('status')).toContainText('Listing restricted.');
+  await vp.goto(`/dj/${dj.slug}`);
+  await expect(vp.getByRole('heading', { name: 'We couldn’t find that page.' })).toBeVisible();
+  await expect(vp.getByText(dj.stageName)).toHaveCount(0);
+  await page.reload();
+  await expect(page.locator('.notice.error')).toContainText(
+    'Your booking page is restricted by Lockd.',
+  );
+  await expect(page.locator('.notice.error')).toContainText(
+    'simulated report for the moderation test',
+  );
+  const restricted = await mail(vp, dj.email, 'Your Lockd booking page has been restricted');
+  await expect(restricted).toContainText('Reason: Synthetic QA: simulated report');
+  await sp.goto('/staff/listings?state=restricted');
+  await expect(sp.getByRole('article', { name: dj.stageName, exact: true })).toContainText(
+    'fraud_report',
+  );
+  await sp.screenshot({ path: 'docs/evidence/staff-listings-desktop.png' });
+  await sp.goto('/staff/notifications?status=sent');
+  await expect(sp.getByRole('heading', { name: 'Every message accounted for.' })).toBeVisible();
+  await expect(sp.getByText(dj.email)).toHaveCount(0);
+  for (const width of [320, 390, 768, 1440]) {
+    await sp.setViewportSize({ width, height: 900 });
+    const wide = await sp.evaluate(() =>
+      [...document.querySelectorAll('body *')]
+        .filter((e) => e.getBoundingClientRect().right > window.innerWidth + 1)
+        .slice(0, 3)
+        .map((e) => `${e.tagName}.${e.className}: ${e.textContent?.slice(0, 40)}`),
+    );
+    expect(wide, `overflow at ${width}px`).toEqual([]);
+  }
+  await sp.setViewportSize({ width: 390, height: 844 });
+  await sp.screenshot({ path: 'docs/evidence/staff-notifications-mobile.png' });
+  expect(errors).toEqual([]);
+  await visitor.close();
+  await staffContext.close();
 });

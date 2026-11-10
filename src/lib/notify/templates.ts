@@ -125,6 +125,7 @@ export function render(
         });
   }
   if (q.audience === 'user') return fail(`No template for ${q.kind}`);
+  if (q.kind.startsWith('LISTING_')) return listing(q, ctx, origin);
   if (q.kind.startsWith('renewal_') || q.kind === 'pro_lapsed' || q.payload.invoiceId !== undefined)
     return billing(q, ctx, origin);
   const b = ctx.booking;
@@ -439,6 +440,40 @@ function change(
         action: open,
       });
   }
+  return fail(`No template for ${q.kind}`);
+}
+
+function listing(q: Queued, ctx: NotificationContext, origin: string): RenderResult {
+  const a = ctx.account;
+  if (!a) return fail('Account context missing');
+  const action = { label: 'Open your dashboard', url: `${origin}/dashboard` };
+  const reason = String(q.payload.note ?? '');
+  if (q.kind === 'LISTING_APPROVED')
+    return ok({
+      subject:
+        q.payload.from === 'restricted'
+          ? 'Your Lockd booking page is active again'
+          : 'You are listed on Lockd',
+      heading:
+        q.payload.from === 'restricted' ? 'Restriction lifted.' : 'Your listing is approved.',
+      paragraphs: [
+        q.payload.from === 'restricted'
+          ? `${a.stageName} can take new holds again, and your page at ${origin}/dj/${a.slug} is visible.`
+          : `${a.stageName} now appears in the Lockd DJ directory. Keep sharing ${origin}/dj/${a.slug} with clients.`,
+      ],
+      action,
+    });
+  if (q.kind === 'LISTING_RESTRICTED')
+    return ok({
+      subject: 'Your Lockd booking page has been restricted',
+      heading: 'New bookings are paused.',
+      paragraphs: [
+        `Lockd restricted ${a.stageName}'s booking page. It is hidden and cannot take new holds. Existing bookings, agreements and records remain available to you and your clients.`,
+        ...(reason ? [`Reason: ${reason}`] : []),
+        'If you believe this is a mistake, reply to this email with any information that helps us review it.',
+      ],
+      action,
+    });
   return fail(`No template for ${q.kind}`);
 }
 

@@ -33,6 +33,16 @@ Open [local Lockd](http://127.0.0.1:3100). Run `npm run worker` in a third termi
 8. On a confirmed booking at least 14 days away, propose a complimentary date change. Accept the exact amendment in both client and DJ views. The original date stays reserved until both accept and the proposed date is still available.
 9. Request cancellation from the client view and review it as the DJ, including the refund basis. Approval releases the date. With synthetic data only, record a refund attestation as DJ and separately acknowledge receipt as client. These actions record statements; they never transfer funds.
 
+### Local staff operations
+
+After enrolling a synthetic reviewer with `npm run billing:local` (below), grant operational scopes:
+
+```sh
+npm run staff:local -- reviewer@example.test listings notifications admin
+```
+
+Sign in as that reviewer and open `/staff`. Enter an authenticator code to unlock staff tools for ten minutes. **Listings** approves new DJs for the public directory or restricts a booking page (new holds pause; existing bookings continue). **Notifications** shows delivery metadata and requeues failed messages. **Admin & audit** grants scopes to other staff and shows every staff action. New DJ accounts are bookable through their own link immediately but appear in the directory only after approval.
+
 ### Local software billing demonstration
 
 Collection defaults disabled. To exercise billing locally, register and verify a separate synthetic reviewer, then run:

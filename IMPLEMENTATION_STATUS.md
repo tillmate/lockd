@@ -33,7 +33,27 @@ Development moved from the OpenAI Codex session to Claude Code. Nothing below is
 4. No public reviews workflow (handover sequence item 7; correctly deferred).
 5. Launch dependencies outside code: legal/privacy sign-off, real Lockd bank details, email provider account and domain, production hosting.
 
-## Current milestone — transactional email delivery and notifications
+## Current milestone — Super Admin operations (scopes, listing moderation, delivery ops, audit)
+
+**Implemented and tested locally.** Builds on the existing billing staff identity and TOTP step-up (ADR 012).
+
+| Capability | Status | Implementation |
+|---|---|---|
+| Scoped staff authority (`listings`, `support`, `notifications`, `admin`) with fresh MFA | EXISTS | `db/011_operations.sql` `staff_can`; enforced in every function, rechecked after lock waits |
+| Super Admin grants/revokes scopes for other staff, never self | EXISTS | `set_staff_scope`, `/staff/admin` |
+| Listing review: pending → approved/restricted with fixed reason codes and notes | EXISTS | `review_listing`, immutable `listing_reviews`, `/staff/listings` |
+| Directory requires approval; restriction hides page and blocks new holds; existing bookings continue | EXISTS | `public_profiles`, patched `create_hold` predicate |
+| DJ sees review status/reason; DJ emails on approve/restrict/reinstate | EXISTS | Dashboard notice, `LISTING_*` templates |
+| Delivery operations: masked metadata, counts, requeue failed non-link messages once | EXISTS | `staff_notifications`, `requeue_notification`, `/staff/notifications` |
+| Unified immutable staff audit trail (operations + billing) | EXISTS | `staff_events`, `staff_audit`, `/staff/admin` |
+| Local scope provisioning | EXISTS (local only) | `npm run staff:local` |
+| Case-scoped support access to a booking, privacy requests, incident log, feature flags, staff disable/recovery UI, production enrollment | MISSING | Next operations slices |
+
+**Verification.** `npm test` **72/72** (4 new: moderation lifecycle and directory/hold effects with emails and immutable history; scope, MFA-expiry, self-review, reason-code and table-access denials; masked notification metadata, link-requeue refusal, single requeue with audit and own-account denial; Super Admin grant/revoke/self-denial and unified audit). New browser journey: a new DJ is unlisted but sees "Listing under review"; staff unlock with an authenticator, approve (DJ appears in directory), restrict with a reason (public page gone, DJ dashboard shows the reason, restriction email delivered), notifications page shows no full addresses; no console errors; no horizontal overflow at 320–1440px. Evidence: `docs/evidence/staff-listings-desktop.png`, `staff-notifications-mobile.png`. Also fixed `<Link className="secondary">` rendering without padding across the app.
+
+## Previous milestone — transactional email delivery and notifications
+
+**GitHub CI passed** on `5a82fb7`: https://github.com/tillmate/lockd/actions/runs/42855619198 (fresh Linux/PostgreSQL, worker-driven browser journeys).
 
 **Implemented and tested locally. No real email provider is configured and no real email has been sent.** Delivery to a real inbox needs a Resend account, API key and verified sending domain (owner action).
 

@@ -295,9 +295,20 @@ export type Agreement = {
 };
 export async function dashboard(ctx: Context) {
   return transaction(ctx, async (c) => {
-    const account = (await c.query('SELECT id,slug,stage_name,parish FROM lockd.accounts'))
-      .rows[0] as { id: string; slug: string; stage_name: string; parish: string } | undefined;
+    const account = (
+      await c.query('SELECT id,slug,stage_name,parish,listing_state FROM lockd.accounts')
+    ).rows[0] as
+      | {
+          id: string;
+          slug: string;
+          stage_name: string;
+          parish: string;
+          listing_state: 'pending' | 'approved' | 'restricted';
+        }
+      | undefined;
     if (!account) return null;
+    const review = (await c.query('SELECT * FROM lockd.my_listing_reviews() LIMIT 1')).rows[0] as
+      { to_state: string; reason_code: string; note: string; created_at: string } | undefined;
     await c.query('SELECT lockd.expire_account($1)', [account.id]);
     const bookings = (
       await c.query(
@@ -314,7 +325,7 @@ export async function dashboard(ctx: Context) {
     ).rows as { id: string; starts_at: string; ends_at: string; reason: string }[];
     const pro = (await c.query('SELECT lockd.pro_access($1) AS pro', [account.id])).rows[0]
       .pro as boolean;
-    return { account, bookings, blocks, pro };
+    return { account, review, bookings, blocks, pro };
   });
 }
 export async function receipt(ctx: Context, cid: string) {

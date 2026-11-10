@@ -32,6 +32,25 @@ export default async function Page() {
           <Logout />
         </div>
       </div>
+      {d.account.listing_state === 'restricted' ? (
+        <div className="notice error" role="alert">
+          <strong>Your booking page is restricted by Lockd.</strong>
+          <p>
+            New holds are paused and your page is hidden. Existing bookings stay available to you
+            and your clients.
+            {d.review?.to_state === 'restricted' && ` Reason: ${d.review.note}`} Reply to the
+            restriction email to appeal.
+          </p>
+        </div>
+      ) : d.account.listing_state === 'pending' ? (
+        <div className="notice" role="status">
+          <strong>Listing under review.</strong>
+          <p>
+            Your booking link already works for clients you share it with. Lockd reviews new DJs
+            before they appear in the public directory.
+          </p>
+        </div>
+      ) : null}
       <div className="stats">
         <div>
           <span>{d.pro ? 'Pro access' : 'Free plan'}</span>

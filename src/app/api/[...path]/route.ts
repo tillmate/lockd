@@ -5,6 +5,7 @@ import { register, login, verifyEmail, resetPassword, requestReset, currentUser 
 import { transaction } from '@/lib/db';
 import * as service from '@/lib/service';
 import * as billing from '@/lib/billing';
+import * as ops from '@/lib/ops';
 import { capability } from '@/lib/validation';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -95,6 +96,16 @@ export async function POST(req: NextRequest, { params }: Params) {
     }
     if (route === 'staff/approve-founding') {
       await billing.approve(ctx, parse());
+      return NextResponse.json({ ok: true });
+    }
+    if (route === 'staff/listings/review')
+      return NextResponse.json({ state: await ops.reviewListing(ctx, parse()) });
+    if (route === 'staff/notifications/requeue') {
+      await ops.requeue(ctx, parse());
+      return NextResponse.json({ ok: true });
+    }
+    if (route === 'staff/scopes') {
+      await ops.setScope(ctx, parse());
       return NextResponse.json({ ok: true });
     }
     if (path[0] === 'invoices' && path.length === 3) {

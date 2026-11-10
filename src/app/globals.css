@@ -198,6 +198,16 @@ button:hover {
 .secondary:hover {
   background: var(--soft);
 }
+a.secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 10px 16px;
+  border-radius: 10px;
+  font-weight: 600;
+  text-decoration: none;
+}
 .process {
   background: var(--soft);
   padding: 34px;
@@ -944,4 +954,44 @@ fieldset {
 .plan-option:has(input:disabled) {
   opacity: 0.6;
   cursor: default;
+}
+
+/* Staff operations */
+.grid-2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  gap: 16px;
+}
+.table-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+}
+.table-scroll table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+.table-scroll th,
+.table-scroll td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+.table-scroll th {
+  color: var(--muted);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.staff-nav,
+.staff-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin: 8px 0 20px;
+}
+.staff-filter {
+  gap: 8px;
 }
