@@ -35,7 +35,9 @@ Development moved from the OpenAI Codex session to Claude Code. Nothing below is
 
 ## Current milestone — Super Admin operations (scopes, listing moderation, delivery ops, audit)
 
-**Implemented and tested locally.** Builds on the existing billing staff identity and TOTP step-up (ADR 012).
+**Implemented and tested locally; GitHub CI passed on `f1035eb`:** https://github.com/tillmate/lockd/actions/runs/42858954816. Builds on the existing billing staff identity and TOTP step-up (ADR 012).
+
+**Recommended next slices:** (1) case-scoped support access to a single booking's records with time-limited grants; (2) privacy/data-subject request workflow and retention jobs (needs owner/legal retention sign-off); (3) Resend bounce/complaint webhooks and suppression list once a provider account exists; (4) staff disable/recovery UI; (5) production deployment plan (managed PostgreSQL, secrets, backups) — requires owner approval.
 
 | Capability | Status | Implementation |
 |---|---|---|
