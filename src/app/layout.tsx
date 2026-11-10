@@ -43,7 +43,8 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         )}
         {stagingMode() && (
           <div className="local">
-            Staging demo · Synthetic data only · No real payments or emails
+            Staging demo · Synthetic data only · No real payments or emails{' '}
+            <Link href="/demo">Demo logins ↗</Link>
           </div>
         )}
         <main id="main">{children}</main>

@@ -3,8 +3,9 @@ import pg from 'pg';
 import { migrate } from './migrate.js';
 import { seedDemo } from './seed-demo.js';
 import { keyConfigured } from '../src/lib/mfa.js';
+import { pgConfig } from '../src/lib/env.js';
 
-// Render pre-deploy step for the staging demo: migrate, give the restricted database roles their
+// Pre-deploy step for the staging demo: migrate, give the restricted database roles their
 // generated passwords, then (re)seed synthetic demo data. Refuses to run anywhere but staging.
 export async function stagingRelease() {
   if (process.env.LOCKD_ENV !== 'staging')
@@ -16,7 +17,7 @@ export async function stagingRelease() {
   for (const name of ['STAFF_MFA_KEY', 'NOTIFICATION_KEY'] as const)
     if (!keyConfigured(name)) throw new Error(`${name} must be 32 bytes (64 hex or base64)`);
   await migrate(url, { allowRemote: true });
-  const c = new pg.Client({ connectionString: url });
+  const c = new pg.Client(pgConfig(url));
   await c.connect();
   try {
     for (const [role, secret] of [

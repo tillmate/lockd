@@ -1,4 +1,4 @@
-import './env'; // Applies staging defaults before any key is read.
+import { PUBLIC_DEMO_STAFF_TOTP, stagingMode } from './env'; // Also applies staging defaults first.
 import {
   createCipheriv,
   createDecipheriv,
@@ -55,6 +55,9 @@ export function verifyTotp(secret: string, code: string, seconds = Date.now() / 
   }
   return null;
 }
+// Staging demo only: the published demo Super Admin authenticator's current code, shown on the
+// unlock screen so reviewers need no authenticator app. Verification itself is unchanged.
+export const demoStaffCode = () => (stagingMode() ? totp(PUBLIC_DEMO_STAFF_TOTP) : undefined);
 // Separate 256-bit keys per purpose: staff authenticator secrets and queued email link tokens.
 export type KeyName = 'STAFF_MFA_KEY' | 'NOTIFICATION_KEY';
 // 64 hex characters (db:local) or base64 of exactly 32 bytes (hosting-generated secrets).

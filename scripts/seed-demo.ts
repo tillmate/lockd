@@ -1,10 +1,17 @@
 import { randomBytes } from 'node:crypto';
 import pg from 'pg';
 import { passwordHash } from '../src/lib/auth.js';
-import { base32, encryptSecret } from '../src/lib/mfa.js';
+import { encryptSecret } from '../src/lib/mfa.js';
+import {
+  DEMO_DJ_EMAIL,
+  DEMO_STAFF_EMAIL,
+  PUBLIC_DEMO_STAFF_TOTP,
+  pgConfig,
+} from '../src/lib/env.js';
 
 // Synthetic, clearly labelled demo data for the staging site. Idempotent: re-running keeps
-// existing rows and only refreshes the two demo logins' passwords from their secrets.
+// existing rows, refreshes the demo logins (password and published authenticator) and puts the
+// demo listings back on show, so every release starts from a presentable demo.
 const djs = [
   {
     slug: 'jordan-p',
@@ -88,13 +95,13 @@ export async function seedDemo(url: string) {
     staff = process.env.DEMO_STAFF_PASSWORD;
   if (!dj || dj.length < 12 || !staff || staff.length < 12)
     throw new Error('DEMO_DJ_PASSWORD and DEMO_STAFF_PASSWORD (12+ characters) are required');
-  const c = new pg.Client({ connectionString: url });
+  const c = new pg.Client(pgConfig(url));
   await c.connect();
   try {
     await c.query('BEGIN');
     for (const d of djs)
       await account(c, await user(c, `${d.slug}@example.com`, randomBytes(24).toString('hex')), d);
-    await account(c, await user(c, process.env.DEMO_DJ_EMAIL || 'demo.dj@example.com', dj), {
+    await account(c, await user(c, process.env.DEMO_DJ_EMAIL || DEMO_DJ_EMAIL, dj), {
       slug: 'demo-your-business',
       stageName: 'DEMO · Your DJ Business',
       parish: 'St. Andrew',
@@ -105,12 +112,19 @@ export async function seedDemo(url: string) {
       deposit: 2750000,
       minutes: 240,
     });
-    const staffId = await user(c, process.env.DEMO_STAFF_EMAIL || 'demo.staff@example.com', staff);
-    // The authenticator secret is created once; staging:enroll-staff shows it in the operator shell.
+    const staffId = await user(c, process.env.DEMO_STAFF_EMAIL || DEMO_STAFF_EMAIL, staff);
+    // The demo Super Admin uses the published authenticator secret; the staging unlock screen shows
+    // its current code. Replay protection (last used code) is kept.
     await c.query(
       `INSERT INTO lockd.billing_staff_members(user_id,secret_cipher,provision_reason) VALUES($1,$2,$3)
-       ON CONFLICT(user_id) DO NOTHING`,
-      [staffId, encryptSecret(base32(randomBytes(20))), 'Staging demo staff account (synthetic)'],
+       ON CONFLICT(user_id) DO UPDATE SET secret_cipher=excluded.secret_cipher`,
+      [staffId, encryptSecret(PUBLIC_DEMO_STAFF_TOTP), 'Staging demo staff account (synthetic)'],
+    );
+    // Anyone can try the demo staff tools, so restricted or unpublished demo listings are put back.
+    await c.query(
+      `UPDATE lockd.accounts SET published=true,listing_state='approved'
+       WHERE slug=ANY($1::text[]) AND (NOT published OR listing_state<>'approved')`,
+      [[...djs.map((d) => d.slug), 'demo-your-business']],
     );
     for (const scope of ['billing', 'listings', 'support', 'notifications', 'admin'])
       await c.query(

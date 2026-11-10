@@ -962,6 +962,23 @@ fieldset {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
   gap: 16px;
 }
+
+/* Staging demo access */
+.demo-login {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  margin: 0 0 12px;
+  font-size: 14px;
+}
+.demo-login dt {
+  color: var(--muted);
+}
+.demo-login dd {
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
 .table-scroll {
   overflow-x: auto;
   border: 1px solid var(--line);

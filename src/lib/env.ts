@@ -1,10 +1,15 @@
 import { createHmac } from 'node:crypto';
 // Deployment settings in one place. Local development uses the explicit URLs written by
-// db:local; Render injects its public URL and the database connection parts instead.
+// db:local; the hosted staging demo derives everything else from the database owner URL.
 
-// Published password for the synthetic staging demo DJ, shown on the staging sign-in page.
+// Published logins for the synthetic staging demo, shown on the staging sign-in and /demo pages.
 export const DEMO_DJ_EMAIL = 'demo.dj@example.com';
 export const PUBLIC_DEMO_DJ_PASSWORD = 'lockd-demo-dj-2026';
+export const DEMO_STAFF_EMAIL = 'demo.staff@example.com';
+export const PUBLIC_DEMO_STAFF_PASSWORD = 'lockd-demo-admin-2026';
+// The demo Super Admin's authenticator secret is published as well: on staging the unlock screen
+// shows its current code, which the server still verifies like any other.
+export const PUBLIC_DEMO_STAFF_TOTP = 'LOCKDDEMOSUPERADMINSTAGINGKEYABC';
 // A minimal staging setup only provides the database owner URL. Every other secret is derived
 // from the owner's password (itself a secret), so nothing else has to be typed into the host.
 // Explicitly configured values always win.
@@ -24,7 +29,7 @@ function applyStagingDefaults() {
     NOTIFIER_DB_PASSWORD: derive('notifier-role'),
     STAFF_MFA_KEY: derive('staff-mfa-key'),
     NOTIFICATION_KEY: derive('notification-key'),
-    DEMO_STAFF_PASSWORD: derive('demo-staff-password').slice(0, 24),
+    DEMO_STAFF_PASSWORD: PUBLIC_DEMO_STAFF_PASSWORD,
     DEMO_DJ_PASSWORD: PUBLIC_DEMO_DJ_PASSWORD,
   };
   for (const [k, v] of Object.entries(defaults)) if (!process.env[k]) process.env[k] = v;
@@ -50,3 +55,18 @@ export const runtimeDatabaseUrl = () =>
   process.env.DATABASE_URL || compose('lockd_runtime', process.env.RUNTIME_DB_PASSWORD);
 export const notifierDatabaseUrl = () =>
   process.env.NOTIFIER_DATABASE_URL || compose('lockd_notifier', process.env.NOTIFIER_DB_PASSWORD);
+// Connection options for every database client. Managed Postgres that requires TLS with its own
+// CA (DigitalOcean binds it as CA_CERT) sets DB_CA_CERT to that PEM: the server certificate must
+// chain to it, and like libpq's verify-ca the host name is not compared. Without DB_CA_CERT the
+// connection string is used as is.
+export function pgConfig(connectionString: string) {
+  const ca = process.env.DB_CA_CERT?.trim();
+  if (!ca) return { connectionString };
+  const url = new URL(connectionString);
+  // An sslmode in the URL would replace the explicit TLS options below.
+  url.searchParams.delete('sslmode');
+  return {
+    connectionString: url.toString(),
+    ssl: { ca, rejectUnauthorized: true, checkServerIdentity: () => undefined },
+  };
+}

@@ -18,7 +18,6 @@
     "billing:local": "tsx scripts/local-billing.ts",
     "staff:local": "tsx scripts/local-staff.ts",
     "staging:release": "tsx scripts/staging-release.ts",
-    "staging:enroll-staff": "tsx scripts/staging-enroll-staff.ts",
     "staging:smoke": "tsx scripts/staging-smoke.ts"
   },
   "dependencies": {

@@ -1,6 +1,7 @@
 import pg from 'pg';
 import { readdirSync, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { pgConfig } from '../src/lib/env.js';
 // Remote databases are only migrated by the reviewed staging release (scripts/staging-release.ts),
 // which must pass allowRemote and run with LOCKD_ENV=staging. Production has no path here.
 export async function migrate(url: string, { allowRemote = false } = {}) {
@@ -10,7 +11,7 @@ export async function migrate(url: string, { allowRemote = false } = {}) {
     throw new Error(
       'Migration tool only permits a local database. Remote migrations require a separately reviewed release process.',
     );
-  const c = new pg.Client({ connectionString: url });
+  const c = new pg.Client(pgConfig(url));
   await c.connect();
   try {
     await c.query('SELECT pg_advisory_lock(717243)');

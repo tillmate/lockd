@@ -1,0 +1,50 @@
+# DigitalOcean App Platform spec for the Lockd staging demo (docs/STAGING.md). Synthetic data only:
+# no email provider, no payments. Create the managed Postgres cluster lockd-staging-db first; the
+# app binds its connection string and CA certificate, so no credential is typed anywhere.
+name: lockd-staging
+region: nyc
+alerts:
+  - rule: DEPLOYMENT_FAILED
+envs:
+  - key: LOCKD_ENV
+    value: staging
+  - key: LOCKD_LOCAL_ONLY
+    value: '0'
+  - key: APP_ORIGIN
+    value: ${APP_URL}
+  # Owner connection: the release job migrates and seeds with it, and the app derives the
+  # restricted role URLs and its keys from it (src/lib/env.ts).
+  - key: MIGRATION_DATABASE_URL
+    value: ${db.DATABASE_URL}
+    scope: RUN_TIME
+  - key: DB_CA_CERT
+    value: ${db.CA_CERT}
+    scope: RUN_TIME
+databases:
+  - name: db
+    engine: PG
+    production: true
+    cluster_name: lockd-staging-db
+    db_name: defaultdb
+    db_user: doadmin
+services:
+  - name: web
+    git:
+      repo_clone_url: https://github.com/tillmate/lockd.git
+      branch: main
+    dockerfile_path: Dockerfile
+    http_port: 8080
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-1gb
+    health_check:
+      http_path: /login
+jobs:
+  # Idempotent release before each deploy: migrations, restricted role passwords, demo seed.
+  - name: release
+    kind: PRE_DEPLOY
+    git:
+      repo_clone_url: https://github.com/tillmate/lockd.git
+      branch: main
+    dockerfile_path: Dockerfile
+    instance_size_slug: apps-s-1vcpu-0.5gb
+    run_command: npm run staging:release

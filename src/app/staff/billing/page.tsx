@@ -4,13 +4,14 @@ import { context } from '@/lib/http';
 import { currentUser } from '@/lib/auth';
 import { staffStatus, queue } from '@/lib/billing';
 import { money } from '@/lib/format';
+import { demoStaffCode } from '@/lib/mfa';
 import { StaffMFA, ApproveFounder } from '@/components/billing';
 export default async function Page() {
   const ctx = await context();
   if (!(await currentUser(ctx))) redirect('/login');
   const access = await staffStatus(ctx);
   if (!access.member) notFound();
-  if (!access.unlocked) return <StaffMFA />;
+  if (!access.unlocked) return <StaffMFA demoCode={demoStaffCode()} />;
   // Billing is its own scope; other staff scopes (even admin) do not include it.
   if (!access.billing) notFound();
   const data = await queue(ctx);

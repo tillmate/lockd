@@ -3,7 +3,7 @@ import pg from 'pg';
 import { dispatch, enqueueReminders, expireHolds } from '../src/lib/notify/dispatcher.js';
 import { deliveryConfig } from '../src/lib/notify/transport.js';
 import { keyConfigured } from '../src/lib/mfa.js';
-import { appOrigin, notifierDatabaseUrl } from '../src/lib/env.js';
+import { appOrigin, notifierDatabaseUrl, pgConfig } from '../src/lib/env.js';
 try {
   process.loadEnvFile('.env.local');
 } catch {
@@ -13,13 +13,14 @@ const origin = appOrigin();
 if (!origin) throw new Error('APP_ORIGIN is required for links in notifications');
 const notifierUrl = notifierDatabaseUrl();
 if (!notifierUrl) throw new Error('NOTIFIER_DATABASE_URL is required for the worker');
+const connection = pgConfig(notifierUrl);
 const config = deliveryConfig();
 // Without the web app's key every queued link email would be undeliverable; fail fast instead.
 if (config.transport && !keyConfigured('NOTIFICATION_KEY'))
   throw new Error('NOTIFICATION_KEY must be set to the web app value when EMAIL_PROVIDER is set');
 // The worker role can expire holds and claim, render and finish queued messages; nothing else.
 const pool = new pg.Pool({
-  connectionString: notifierUrl,
+  ...connection,
   max: 3,
   statement_timeout: 15000,
   options: '-c timezone=UTC',
@@ -93,7 +94,7 @@ function dispatchTick() {
 let listener: pg.Client | null = null;
 async function listen() {
   if (!config.transport || stopping) return;
-  const client = new pg.Client({ connectionString: notifierUrl });
+  const client = new pg.Client(connection);
   listener = client;
   client.on('notification', () => void dispatchTick());
   client.on('error', () => {

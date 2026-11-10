@@ -3,6 +3,7 @@ import { redirect } from 'next/navigation';
 import { currentUser } from '@/lib/auth';
 import { context } from '@/lib/http';
 import { dashboard } from '@/lib/service';
+import { staffAccess } from '@/lib/ops';
 import { labels, myCases } from '@/lib/support';
 import { date, money, statusLabel } from '@/lib/format';
 import { BlockForm, Logout, RemoveBlock } from '@/components/forms';
@@ -10,7 +11,8 @@ export default async function Page() {
   const ctx = await context();
   if (!(await currentUser(ctx))) redirect('/login');
   const d = await dashboard(ctx);
-  if (!d) redirect('/onboarding');
+  // Staff members without a DJ page land on the staff tools rather than DJ onboarding.
+  if (!d) redirect((await staffAccess(ctx)).member ? '/staff' : '/onboarding');
   const openCases = (await myCases(ctx)).filter((c) => c.state === 'open');
   const active = d.bookings.filter(
     (b) =>

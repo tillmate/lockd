@@ -1,11 +1,11 @@
 import pg from 'pg';
-import { notifierDatabaseUrl, runtimeDatabaseUrl } from '../src/lib/env.js';
+import { notifierDatabaseUrl, pgConfig, runtimeDatabaseUrl } from '../src/lib/env.js';
 
 // Post-release check (CI and the hosting shell): both restricted roles connect with the composed
 // URLs, the demo directory is seeded, and the web role still cannot read tables directly.
 async function as<T>(url: string | undefined, run: (c: pg.Client) => Promise<T>) {
   if (!url) throw new Error('Database URL could not be composed; check DB_HOST and passwords');
-  const c = new pg.Client({ connectionString: url });
+  const c = new pg.Client(pgConfig(url));
   await c.connect();
   try {
     return await run(c);

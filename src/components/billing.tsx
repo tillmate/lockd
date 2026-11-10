@@ -146,7 +146,13 @@ export function PlanPicker({ data }: { data: BillingHome }) {
     </div>
   );
 }
-export function StaffMFA({ area = 'billing' }: { area?: 'billing' | 'operations' }) {
+export function StaffMFA({
+  area = 'billing',
+  demoCode,
+}: {
+  area?: 'billing' | 'operations';
+  demoCode?: string;
+}) {
   const router = useRouter();
   return (
     <div className="narrow card">
@@ -157,6 +163,13 @@ export function StaffMFA({ area = 'billing' }: { area?: 'billing' | 'operations'
           ? 'Use your authenticator to unlock billing review for ten minutes. Billing access does not include clients’ booking agreements or DJ deposit evidence.'
           : 'Use your authenticator to unlock staff tools for ten minutes. Every action is recorded with your reason. Staff tools never show clients’ agreements, receipts or private links.'}
       </p>
+      {demoCode && (
+        <p className="notice" role="note">
+          Staging demo: the demo Super Admin’s authenticator code right now is{' '}
+          <strong>{demoCode}</strong>. Codes change every 30 seconds and work once; reload this page
+          for a fresh one.
+        </p>
+      )}
       <BillingForm
         label={area === 'billing' ? 'Unlock billing review' : 'Unlock staff tools'}
         run={async (d) => {
@@ -172,6 +185,7 @@ export function StaffMFA({ area = 'billing' }: { area?: 'billing' | 'operations'
           minLength={6}
           maxLength={6}
           autoComplete="one-time-code"
+          defaultValue={demoCode}
         />
       </BillingForm>
     </div>
