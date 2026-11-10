@@ -17,6 +17,7 @@ import {
   refundRecord,
   refundAcknowledgement,
 } from './validation';
+import { socialsInput, type Category, type Socials } from './creatives';
 
 export type Package = {
   id: string;
@@ -32,8 +33,17 @@ export type Profile = {
   stageName: string;
   parish: string;
   bio: string;
+  category: Category;
+  headline: string | null;
+  socials: Socials;
   packages: Package[];
 };
+export async function setSocials(ctx: Context, input: unknown) {
+  const d = socialsInput.parse(input);
+  await transaction(ctx, async (c) => {
+    await c.query('SELECT lockd.set_social_links($1)', [d]);
+  });
+}
 export async function profiles(slug?: string): Promise<Profile[]> {
   return transaction(
     {},
@@ -358,14 +368,14 @@ export async function complete(ctx: Context, id: string) {
     await c.query('SELECT lockd.complete_booking($1)', [id]);
   });
 }
-export type Settings = z.infer<typeof profileUpdate>;
+export type Settings = z.infer<typeof profileUpdate> & { socials?: Socials };
 export async function settings(ctx: Context): Promise<Settings | null> {
   return transaction(
     ctx,
     async (c) =>
       (
         await c.query(
-          `SELECT a.slug,a.stage_name AS "stageName",a.parish,a.bio,a.deposit_instructions AS "depositInstructions",a.agreement_template AS agreement,a.revision,a.published,p.id AS "packageId",p.name AS "packageName",p.description,p.price_minor AS "priceMinor",p.deposit_minor AS "depositMinor",p.duration_minutes AS "durationMinutes",p.buffer_before AS "bufferBefore",p.buffer_after AS "bufferAfter" FROM lockd.accounts a JOIN lockd.packages p ON p.account_id=a.id ORDER BY p.id LIMIT 1`,
+          `SELECT a.slug,a.stage_name AS "stageName",a.parish,a.bio,a.deposit_instructions AS "depositInstructions",a.agreement_template AS agreement,a.revision,a.published,a.socials,p.id AS "packageId",p.name AS "packageName",p.description,p.price_minor AS "priceMinor",p.deposit_minor AS "depositMinor",p.duration_minutes AS "durationMinutes",p.buffer_before AS "bufferBefore",p.buffer_after AS "bufferAfter" FROM lockd.accounts a JOIN lockd.packages p ON p.account_id=a.id ORDER BY p.id LIMIT 1`,
         )
       ).rows[0] ?? null,
   );

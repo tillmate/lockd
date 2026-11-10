@@ -12,6 +12,7 @@ import {
 import { moneyToMinor, parishNames } from '@/lib/validation';
 import { money } from '@/lib/format';
 import type { Profile, Settings } from '@/lib/service';
+import { socialNetworks, type Socials } from '@/lib/creatives';
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -424,9 +425,11 @@ export function OnboardForm({ initial }: { initial?: Settings }) {
     </form>
   );
 }
-export function HoldForm({ dj }: { dj: Profile }) {
+export function HoldForm({ dj, initialPackage }: { dj: Profile; initialPackage?: string }) {
   const router = useRouter();
-  const [selected, setSelected] = useState(dj.packages[0]?.id ?? ''),
+  const [selected, setSelected] = useState(
+      dj.packages.find((p) => p.id === initialPackage)?.id ?? dj.packages[0]?.id ?? '',
+    ),
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false);
   const [attempt] = useState(() => ({
@@ -593,5 +596,58 @@ export function RemoveBlock({ id }: { id: string }) {
       </button>
       <Notice error={error} />
     </>
+  );
+}
+export function SocialsForm({ initial }: { initial: Socials }) {
+  const [busy, setBusy] = useState(false),
+    [error, setError] = useState(''),
+    [message, setMessage] = useState('');
+  const router = useRouter();
+  return (
+    <form
+      className="card form"
+      onSubmit={async (e) => {
+        e.preventDefault();
+        setBusy(true);
+        setError('');
+        setMessage('');
+        try {
+          const d = new FormData(e.currentTarget);
+          await api(
+            'settings/socials',
+            Object.fromEntries(socialNetworks.map((n) => [n.key, val(d, n.key)])),
+          );
+          setMessage('Social links saved. They show on your public profile.');
+          router.refresh();
+        } catch (e) {
+          setError((e as Error).message);
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      <h2>Social links</h2>
+      <p>
+        Shown on your public profile so clients can see your work. Leave a box empty to hide it.
+      </p>
+      {socialNetworks.map((n) => (
+        <Field
+          key={n.key}
+          label={n.label}
+          name={n.key}
+          type="url"
+          required={false}
+          maxLength={200}
+          placeholder={
+            n.key === 'website'
+              ? 'https://your-site.com'
+              : `https://${n.key === 'x' ? 'x' : n.key}.com/yourname`
+          }
+          defaultValue={initial[n.key] ?? ''}
+        />
+      ))}
+      <Notice error={error} message={message} />
+      <Submit busy={busy}>Save social links</Submit>
+    </form>
   );
 }

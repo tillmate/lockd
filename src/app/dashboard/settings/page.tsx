@@ -3,7 +3,7 @@ import { redirect } from 'next/navigation';
 import { context } from '@/lib/http';
 import { currentUser } from '@/lib/auth';
 import { settings } from '@/lib/service';
-import { OnboardForm } from '@/components/forms';
+import { OnboardForm, SocialsForm } from '@/components/forms';
 export default async function Page() {
   const ctx = await context();
   if (!(await currentUser(ctx))) redirect('/login');
@@ -23,6 +23,7 @@ export default async function Page() {
         </div>
       </div>
       <OnboardForm initial={initial} />
+      <SocialsForm initial={initial.socials ?? {}} />
     </div>
   );
 }

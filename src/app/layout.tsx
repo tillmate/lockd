@@ -23,7 +23,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             Lockd<span className="dot">.</span>
           </Link>
           <nav aria-label="Main" className="main-nav">
-            <Link href="/#creatives">Find creatives</Link>
+            <Link href="/creatives">Find creatives</Link>
             <Link href="/#how-it-works">How it works</Link>
             <Link href="/register">For creatives</Link>
             <Link href="/#about">About</Link>
@@ -60,7 +60,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             </span>
           </div>
           <nav aria-label="Footer" className="footer-links">
-            <Link href="/#creatives">Explore creatives</Link>
+            <Link href="/creatives">Explore creatives</Link>
             <Link href="/#how-it-works">How it works</Link>
             <Link href="/register">List your talent</Link>
           </nav>

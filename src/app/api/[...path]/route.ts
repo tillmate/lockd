@@ -91,6 +91,10 @@ export async function POST(req: NextRequest, { params }: Params) {
       await service.updateProfile(ctx, parse());
       return NextResponse.json({ ok: true });
     }
+    if (route === 'settings/socials') {
+      await service.setSocials(ctx, parse());
+      return NextResponse.json({ ok: true });
+    }
     if (route === 'billing/invoices') {
       await limit(`invoices:${ctx.session ?? 'anonymous'}`, 20);
       return NextResponse.json({ id: await billing.issue(ctx, parse()) });

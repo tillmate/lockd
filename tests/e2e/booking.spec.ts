@@ -448,7 +448,7 @@ test('staff review a new listing for the directory, then restrict it with an aud
   await expect(page.getByRole('status').filter({ hasText: 'Listing under review.' })).toBeVisible();
   const visitor = await browser.newContext();
   const vp = await visitor.newPage();
-  await vp.goto('/');
+  await vp.goto('/creatives');
   await expect(vp.getByText(dj.stageName)).toHaveCount(0);
   const staffContext = await browser.newContext(),
     sp = await staffContext.newPage();
@@ -476,7 +476,8 @@ test('staff review a new listing for the directory, then restrict it with an aud
   await approve.getByRole('button', { name: 'Approve listing' }).click();
   // Durable state: the decided listing leaves the pending queue.
   await expect(card).toHaveCount(0);
-  await vp.goto('/');
+  // The full directory is the search page; the landing page shows a featured selection.
+  await vp.goto('/creatives');
   await expect(vp.getByText(dj.stageName).first()).toBeVisible();
   // A client books the newly listed DJ and uploads evidence; support then reviews it in a case.
   const client = await browser.newContext({ viewport: { width: 390, height: 844 } });
