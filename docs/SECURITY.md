@@ -9,6 +9,7 @@
 - Backend input validation and database constraints. Bounded HTTP bodies, image signatures, pixel limits, decoding and re-encoding. No arbitrary HTML or SVG uploads.
 - Database-serialized Free cap, exclusion constraints for ranges and lock ordering for state transitions.
 - Immutable agreement/signature/claim/attestation/audit records. Evidence alone cannot confirm a booking.
+- Profile edits reject stale revisions and preserve private audit snapshots. Amendments require independent role-authorized signatures; atomic range replacement retains the original booking on conflicts. Cancellation/refund records are immutable, tenant-scoped and never initiate a payment.
 - Rate limits stored in PostgreSQL for auth, hold creation, guest exchange and proof uploads. No reliance on in-process rate-limit maps.
 - Public source excludes secrets and local customer/test state. Public profile data uses only user-entered records; no ratings or testimonials are fabricated.
 
@@ -29,6 +30,6 @@ The local mailbox intentionally contains raw development tokens on disk and is a
 5. Stronger abuse prevention for anonymous holds (e.g. verified contact / bot challenge), per-client network limits at a trusted edge, and load testing. Current per-email/per-DJ limits do not eliminate intentional calendar exhaustion.
 6. Strict nonce-based production CSP. Current development CSP allows inline scripts/eval for Next.js dev behavior; do not consider it the final production policy.
 7. Capability recovery/revocation and support workflow, upload scanning/retention and deletion/legal-hold procedures.
-8. SaaS manual invoices, founding eligibility, paid entitlements, cancellation/reschedule and refund decision workflows; all event funds remain outside Lockd custody.
+8. SaaS manual invoices, founding eligibility and paid entitlements; operational dispute resolution, installment/corrected refunds, and late-fund resolution after expiry. Upcoming-booking cancellation, complimentary rescheduling and full direct-refund records now exist locally; all event funds remain outside Lockd custody.
 
 Automated tests cover implementation invariants; they do not replace an independent penetration test or legal sign-off.

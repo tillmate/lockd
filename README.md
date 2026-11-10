@@ -29,6 +29,9 @@ Open [local Lockd](http://127.0.0.1:3100). Optionally run `npm run worker` in a 
 4. Open the DJ booking page in another browser or private window. Choose an event more than 72 hours away, create a hold, and save the private access link.
 5. Sign the agreement and upload a synthetic PNG/JPEG receipt. The booking remains pending.
 6. In the DJ workspace, open the booking, inspect the receipt, and record a synthetic actual-receipt attestation. Only this explicit authorized action can confirm the booking.
+7. Edit **Profile & package** from the dashboard. Existing signed prices and agreements remain unchanged; updated details apply to new bookings.
+8. On a confirmed booking at least 14 days away, propose a complimentary date change. Accept the exact amendment in both client and DJ views. The original date stays reserved until both accept and the proposed date is still available.
+9. Request cancellation from the client view and review it as the DJ, including the refund basis. Approval releases the date. With synthetic data only, record a refund attestation as DJ and separately acknowledge receipt as client. These actions record statements; they never transfer funds.
 
 All mailbox messages stay on disk. No email or financial provider is connected. Test links are fragment-based and removed from browser history when exchanged for an HttpOnly cookie. Do not share them publicly.
 
@@ -62,7 +65,7 @@ Read [implementation status](IMPLEMENTATION_STATUS.md), [architecture decisions]
 
 ## Scope and launch gates
 
-This slice supports one configured service per DJ via onboarding, personal availability blocks, the three-active Free cap, partial/rejected evidence, duplicate detection, late-payment exceptions and completion. Paid subscriptions, founding-seat allocation, cancellation/refund/reschedule workflows, staff MFA/admin, reviewed legal terms, verified listing moderation, retention operations, external messaging and production hosting remain separate milestones. No invented bank instructions, paid entitlements, reviews or ratings are shipped.
+This slice supports one editable service per DJ, personal availability blocks, the three-active Free cap, partial/rejected evidence, duplicate detection, late-payment exceptions, completion, upcoming-booking cancellation, direct-refund records and one eligible date amendment with both signatures. Paid subscriptions, founding-seat allocation, staff MFA/admin, reviewed legal terms, verified listing moderation, retention operations, external messaging and production hosting remain separate milestones. No invented bank instructions, paid entitlements, reviews or ratings are shipped. See architecture decisions for amendment eligibility, refund defaults, conservative deadlines and unsupported dispute/expired-fund cases.
 
 The Figma source was inspected through MCP. The application adapts the approved ivory/gold visual language and real booking steps to responsive HTML; it is not a pixel-for-pixel reconstruction of all design frames. Static logo is sourced from Figma; Inter is bundled locally via Fontsource. The initial audit found no existing application and the owner confirmed a new repository was needed.
 

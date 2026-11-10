@@ -1,7 +1,20 @@
 import { z } from 'zod';
 import sharp from 'sharp';
 import { hash, transaction, type Context } from './db';
-import { blockInput, holdInput, onboarding, signatureInput, verificationInput } from './validation';
+import {
+  blockInput,
+  holdInput,
+  onboarding,
+  signatureInput,
+  verificationInput,
+  profileUpdate,
+  changeProposal,
+  changeResponse,
+  cancellationRequest,
+  cancellationDecision,
+  refundRecord,
+  refundAcknowledgement,
+} from './validation';
 
 export type Package = {
   id: string;
@@ -136,17 +149,36 @@ export async function booking(ctx: Context, bid: string) {
   return transaction(ctx, async (c) => {
     const b = (
       await c.query(
-        'SELECT id,account_id,package_id,client_name,client_email,venue,starts_at,ends_at,price_minor,deposit_minor,status,original_expires_at,expires_at,grace_used,verified_minor FROM lockd.bookings WHERE id=$1',
+        'SELECT id,account_id,package_id,client_name,client_email,venue,starts_at,ends_at,price_minor,deposit_minor,status,original_expires_at,expires_at,grace_used,verified_minor,agreement_version,reschedules_used FROM lockd.bookings WHERE id=$1',
         [bid],
       )
     ).rows[0];
     if (!b) return null;
-    const agreement = (
+    const agreements = (
       await c.query(
-        'SELECT a.*,s.signer,s.accepted_at FROM lockd.agreements a LEFT JOIN lockd.signatures s ON s.agreement_id=a.id WHERE a.booking_id=$1',
+        'SELECT a.*,s.signer,s.accepted_at FROM lockd.agreements a LEFT JOIN lockd.signatures s ON s.agreement_id=a.id WHERE a.booking_id=$1 ORDER BY a.version',
         [bid],
       )
-    ).rows[0];
+    ).rows;
+    const agreement = agreements.find((a) => a.version === b.agreement_version);
+    const amendments = (
+      await c.query(
+        "SELECT m.id,m.agreement_id,m.proposed_by,m.old_start,m.new_start,m.new_end,m.reason,CASE WHEN m.state='pending' AND m.expires_at<=clock_timestamp() THEN 'expired' ELSE m.state END AS state,m.expires_at,COALESCE((SELECT jsonb_agg(jsonb_build_object('party',x.party,'signer',x.signer,'created_at',x.created_at)) FROM lockd.amendment_acceptances x WHERE x.amendment_id=m.id),'[]'::jsonb) AS acceptances FROM lockd.amendments m WHERE m.booking_id=$1 ORDER BY m.created_at",
+        [bid],
+      )
+    ).rows;
+    const cancellations = (
+      await c.query(
+        'SELECT q.id,q.reason,q.created_at,d.decision FROM lockd.cancellation_requests q LEFT JOIN lockd.cancellation_decisions d ON d.request_id=q.id WHERE q.booking_id=$1 ORDER BY q.created_at',
+        [bid],
+      )
+    ).rows;
+    const decisions = (
+      await c.query(
+        'SELECT d.id,d.request_id,d.initiated_by,d.decision,d.verified_minor,d.suggested_minor,d.refund_minor,d.reason,d.basis,d.due_at,d.created_at,r.reference AS refund_reference,r.created_at AS refunded_at,a.created_at AS acknowledged_at FROM lockd.cancellation_decisions d LEFT JOIN lockd.refund_records r ON r.decision_id=d.id LEFT JOIN lockd.refund_acknowledgements a ON a.decision_id=d.id WHERE d.booking_id=$1 ORDER BY d.created_at',
+        [bid],
+      )
+    ).rows;
     const claims = (
       await c.query(
         'SELECT c.id,c.reference,c.claimed_minor,c.received_at,c.on_time,v.decision,v.amount_minor,v.reason FROM lockd.claims c LEFT JOIN lockd.verifications v ON v.claim_id=c.id WHERE c.booking_id=$1 ORDER BY c.received_at',
@@ -159,7 +191,16 @@ export async function booking(ctx: Context, bid: string) {
         [bid],
       )
     ).rows;
-    return { ...b, agreement, claims, events } as Booking;
+    return {
+      ...b,
+      agreement,
+      agreements,
+      amendments,
+      cancellations,
+      decisions,
+      claims,
+      events,
+    } as Booking;
   });
 }
 export type Booking = {
@@ -178,14 +219,39 @@ export type Booking = {
   expires_at: Date | string;
   grace_used: boolean;
   verified_minor: number;
-  agreement: {
+  reschedules_used: number;
+  agreement_version: number;
+  agreements: Agreement[];
+  amendments: {
     id: string;
-    body: string;
-    content_hash: string;
-    payment_instructions: string;
-    signer: string | null;
-    accepted_at: Date | string | null;
-  };
+    agreement_id: string;
+    proposed_by: string;
+    old_start: string;
+    new_start: string;
+    new_end: string;
+    reason: string;
+    state: string;
+    expires_at: string;
+    acceptances: { party: string; signer: string; created_at: string }[];
+  }[];
+  cancellations: { id: string; reason: string; created_at: string; decision: string | null }[];
+  decisions: {
+    id: string;
+    request_id: string | null;
+    initiated_by: string;
+    decision: string;
+    verified_minor: number;
+    suggested_minor: number;
+    refund_minor: number;
+    reason: string;
+    basis: string;
+    due_at: string | null;
+    created_at: string;
+    refund_reference: string | null;
+    refunded_at: string | null;
+    acknowledged_at: string | null;
+  }[];
+  agreement: Agreement;
   claims: {
     id: string;
     reference: string;
@@ -197,6 +263,15 @@ export type Booking = {
     reason: string | null;
   }[];
   events: { kind: string; details: Record<string, unknown>; created_at: Date | string }[];
+};
+export type Agreement = {
+  id: string;
+  version: number;
+  body: string;
+  content_hash: string;
+  payment_instructions: string;
+  signer: string | null;
+  accepted_at: Date | string | null;
 };
 export async function dashboard(ctx: Context) {
   return transaction(ctx, async (c) => {
@@ -248,5 +323,97 @@ export async function complete(ctx: Context, id: string) {
   z.uuid().parse(id);
   await transaction(ctx, async (c) => {
     await c.query('SELECT lockd.complete_booking($1)', [id]);
+  });
+}
+export type Settings = z.infer<typeof profileUpdate>;
+export async function settings(ctx: Context): Promise<Settings | null> {
+  return transaction(
+    ctx,
+    async (c) =>
+      (
+        await c.query(
+          `SELECT a.slug,a.stage_name AS "stageName",a.parish,a.bio,a.deposit_instructions AS "depositInstructions",a.agreement_template AS agreement,a.revision,a.published,p.id AS "packageId",p.name AS "packageName",p.description,p.price_minor AS "priceMinor",p.deposit_minor AS "depositMinor",p.duration_minutes AS "durationMinutes",p.buffer_before AS "bufferBefore",p.buffer_after AS "bufferAfter" FROM lockd.accounts a JOIN lockd.packages p ON p.account_id=a.id ORDER BY p.id LIMIT 1`,
+        )
+      ).rows[0] ?? null,
+  );
+}
+export async function updateProfile(ctx: Context, input: unknown) {
+  const d = profileUpdate.parse(input);
+  await transaction(ctx, async (c) => {
+    await c.query('SELECT lockd.update_profile($1)', [d]);
+  });
+}
+export async function proposeChange(ctx: Context, bid: string, input: unknown) {
+  z.uuid().parse(bid);
+  const d = changeProposal.parse(input);
+  return transaction(
+    ctx,
+    async (c) =>
+      (
+        await c.query('SELECT lockd.propose_amendment($1,$2,$3,$4) AS id', [
+          bid,
+          d.party,
+          d.startsAt,
+          d.reason,
+        ])
+      ).rows[0].id as string,
+  );
+}
+export async function respondChange(ctx: Context, bid: string, input: unknown) {
+  z.uuid().parse(bid);
+  const d = changeResponse.parse(input);
+  await transaction(ctx, async (c) => {
+    await c.query('SELECT lockd.respond_amendment($1,$2,$3,$4,$5,$6)', [
+      bid,
+      d.amendmentId,
+      d.party,
+      d.action,
+      d.contentHash,
+      d.signer,
+    ]);
+  });
+}
+export async function requestCancellation(ctx: Context, bid: string, input: unknown) {
+  z.uuid().parse(bid);
+  const d = cancellationRequest.parse(input);
+  return transaction(
+    ctx,
+    async (c) =>
+      (await c.query('SELECT lockd.request_cancellation($1,$2) AS id', [bid, d.reason])).rows[0]
+        .id as string,
+  );
+}
+export async function decideCancellation(ctx: Context, bid: string, input: unknown) {
+  z.uuid().parse(bid);
+  const d = cancellationDecision.parse(input);
+  await transaction(ctx, async (c) => {
+    await c.query('SELECT lockd.decide_cancellation($1,$2,$3,$4,$5,$6,$7)', [
+      bid,
+      d.requestId,
+      d.approve,
+      d.refundMinor,
+      d.reason,
+      d.basis,
+      d.attest,
+    ]);
+  });
+}
+export async function recordRefund(ctx: Context, bid: string, input: unknown) {
+  z.uuid().parse(bid);
+  const d = refundRecord.parse(input);
+  await transaction(ctx, async (c) => {
+    await c.query('SELECT lockd.record_refund($1,$2,$3,$4)', [
+      bid,
+      d.decisionId,
+      d.reference,
+      d.attest,
+    ]);
+  });
+}
+export async function acknowledgeRefund(ctx: Context, bid: string, input: unknown) {
+  z.uuid().parse(bid);
+  const d = refundAcknowledgement.parse(input);
+  await transaction(ctx, async (c) => {
+    await c.query('SELECT lockd.acknowledge_refund($1,$2,$3)', [bid, d.decisionId, d.attest]);
   });
 }

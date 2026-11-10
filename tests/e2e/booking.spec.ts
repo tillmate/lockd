@@ -137,6 +137,89 @@ test('complete browser journey with two isolated DJs and an account-free client'
   expect(
     confirmed.events.filter((e: { kind: string }) => e.kind === 'CONFIRMED_LOCKD'),
   ).toHaveLength(1);
+  // Edit the live profile/package, while proving the already signed booking stays unchanged.
+  await page.goto('/dashboard');
+  await page.getByRole('link', { name: 'Edit profile & package' }).click();
+  await expect(page.getByLabel('Booking page address')).toHaveValue(a.slug);
+  await page.getByLabel('Stage name', { exact: true }).fill('TEST DJ ALPHA UPDATED');
+  await page.getByLabel('Total price (JMD)').fill('60000');
+  await page
+    .getByLabel('Your booking agreement')
+    .fill('REPLACEMENT TEST TERMS. Apply only to new synthetic bookings.');
+  await page.getByRole('button', { name: 'Save profile and package' }).click();
+  await expect(page).toHaveURL(/dashboard$/);
+  await expect(page.getByRole('heading', { name: 'TEST DJ ALPHA UPDATED' })).toBeVisible();
+  await cp.reload();
+  expect((await (await cp.request.get(`/api/bookings/${id}`)).json()).agreement.content_hash).toBe(
+    confirmed.agreement.content_hash,
+  );
+  await cp.getByText('Propose a complimentary date change', { exact: true }).click();
+  const moved = new Date(Date.now() + 60 * 86400000).toISOString().slice(0, 10);
+  await cp.getByLabel('Proposed start (Jamaica time)').fill(`${moved}T20:00`);
+  await cp
+    .getByLabel('Reason for date change')
+    .fill('Synthetic date change for browser acceptance testing.');
+  await cp.getByRole('button', { name: 'Propose date change', exact: true }).click();
+  await expect(cp.getByText('Agreement amendment · v2', { exact: true })).toBeVisible();
+  await cp.getByLabel('Full name for amended agreement').fill('Synthetic Client');
+  await cp.getByLabel('I read and accept this exact amended agreement').check();
+  await cp.getByRole('button', { name: 'Accept amended agreement', exact: true }).click();
+  await expect(cp.getByText('Client accepted as Synthetic Client', { exact: false })).toBeVisible();
+  expect((await (await cp.request.get(`/api/bookings/${id}`)).json()).starts_at).toBe(
+    confirmed.starts_at,
+  );
+  await page.goto(`/dashboard/bookings/${id}`);
+  await page.getByLabel('Full name for amended agreement').fill('Synthetic DJ');
+  await page.getByLabel('I read and accept this exact amended agreement').check();
+  await page.getByRole('button', { name: 'Accept amended agreement', exact: true }).click();
+  await expect(page.getByText('The complimentary date change has been used.')).toBeVisible();
+  await cp.reload();
+  const amended = await (await cp.request.get(`/api/bookings/${id}`)).json();
+  expect(amended.agreement_version).toBe(2);
+  expect(amended.agreements[0].content_hash).toBe(confirmed.agreement.content_hash);
+  expect(amended.price_minor).toBe(5500000);
+  expect(amended.starts_at).not.toBe(confirmed.starts_at);
+  await cp.screenshot({ path: 'docs/evidence/amended-mobile.png', fullPage: true });
+  await cp.getByText('Request cancellation', { exact: true }).click();
+  await cp
+    .getByLabel('Reason for cancellation request')
+    .fill('Synthetic client request. No real event or funds.');
+  await cp.getByRole('button', { name: 'Send cancellation request' }).click();
+  await expect(cp.getByText('Client cancellation requested', { exact: true })).toBeVisible();
+  await page.reload();
+  await page.getByText('Review client cancellation request', { exact: true }).click();
+  await expect(page.getByLabel('Refund owed (JMD)')).toHaveValue('13750.00');
+  await page.getByLabel('Cancellation decision reason').fill('Synthetic approved cancellation.');
+  await page
+    .getByLabel('Signed agreement / legal basis for this decision')
+    .fill('Synthetic QA default only. No real contractual determination.');
+  await page
+    .getByLabel('I reviewed the signed agreement and applicable refund obligations.')
+    .check();
+  await page.getByRole('button', { name: 'Record cancellation decision' }).click();
+  await expect(page.getByRole('heading', { name: 'Booking cancelled.' })).toBeVisible();
+  await expect(page.getByText('Refund outstanding. No transfer has been recorded.')).toBeVisible();
+  await page.getByLabel('Refund transfer reference').fill(`TEST-REFUND-${randomUUID()}`);
+  await page.getByLabel('I have already returned the full recorded refund').check();
+  await page.getByRole('button', { name: 'Record direct refund attestation' }).click();
+  await expect(page.getByText('Awaiting client acknowledgement of receipt.')).toBeVisible();
+  await cp.reload();
+  await cp
+    .getByLabel('I checked my own account and actually received the full recorded refund.')
+    .check();
+  await cp.getByRole('button', { name: 'Acknowledge refund received' }).click();
+  await expect(
+    cp.getByText('Client acknowledged actual receipt on', { exact: false }),
+  ).toBeVisible();
+  await cp.screenshot({ path: 'docs/evidence/cancelled-refund-mobile.png', fullPage: true });
+  await page.reload();
+  await page.screenshot({ path: 'docs/evidence/cancelled-refund-desktop.png', fullPage: true });
+  const cancelled = await (await cp.request.get(`/api/bookings/${id}`)).json();
+  expect(cancelled.status).toBe('CANCELLED');
+  expect(cancelled.verified_minor).toBe(2750000);
+  expect(cancelled.decisions[0].refund_minor).toBe(1375000);
+  expect(cancelled.decisions[0].acknowledged_at).toBeTruthy();
+  expect((await bpage.request.get(`/api/bookings/${id}`)).status()).toBe(404);
   for (const width of [320, 360, 390, 768, 1024, 1440]) {
     await cp.setViewportSize({ width, height: 1000 });
     expect(await cp.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(

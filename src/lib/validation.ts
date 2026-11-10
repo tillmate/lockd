@@ -41,6 +41,47 @@ export const onboarding = z
   })
   .refine((d) => d.depositMinor <= d.priceMinor, { message: 'Deposit cannot exceed total price' });
 export const capability = z.string().regex(/^[a-f0-9]{64}$/);
+export const profileUpdate = onboarding.safeExtend({
+  packageId: z.uuid(),
+  revision: z.number().int().positive(),
+  published: z.boolean(),
+});
+export const changeProposal = z.object({
+  party: z.enum(['client', 'dj']),
+  startsAt: z.iso.datetime({ offset: true }),
+  reason: text(3, 1000),
+});
+export const changeResponse = z
+  .object({
+    amendmentId: z.uuid(),
+    party: z.enum(['client', 'dj']),
+    action: z.enum(['accept', 'decline', 'withdraw']),
+    contentHash: capability,
+    signer: text(0, 120),
+    accept: z.boolean(),
+  })
+  .refine((d) => d.action !== 'accept' || (d.accept && d.signer.length >= 2), {
+    message: 'Sign and accept the exact amended agreement',
+  });
+export const cancellationRequest = z.object({ reason: text(3, 1000) });
+export const cancellationDecision = z
+  .object({
+    requestId: z.uuid().nullable(),
+    approve: z.boolean(),
+    refundMinor: z.number().int().min(0).max(100000000),
+    reason: text(3, 1000),
+    basis: text(10, 1000),
+    attest: z.literal(true),
+  })
+  .refine((d) => d.approve || d.refundMinor === 0, {
+    message: 'Declined requests cannot record a refund obligation',
+  });
+export const refundRecord = z.object({
+  decisionId: z.uuid(),
+  reference: text(2, 100),
+  attest: z.literal(true),
+});
+export const refundAcknowledgement = z.object({ decisionId: z.uuid(), attest: z.literal(true) });
 export const holdInput = z.object({
   creatorId: z.uuid(),
   packageId: z.uuid(),

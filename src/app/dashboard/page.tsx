@@ -22,7 +22,12 @@ export default async function Page() {
           <p className="eyebrow">YOUR BUSINESS, IN SYNC</p>
           <h1>{d.account.stage_name}</h1>
         </div>
-        <Logout />
+        <div className="actions">
+          <Link className="secondary" href="/dashboard/settings">
+            Edit profile & package
+          </Link>{' '}
+          <Logout />
+        </div>
       </div>
       <div className="stats">
         <div>

@@ -1,13 +1,13 @@
 # Lockd implementation status
 
-## Current milestone — first booking slice
+## Current milestone — profile editing, cancellation and date amendments
 
 **Implemented locally with real PostgreSQL persistence. Not production-ready or deployed.** The browser workflow is connected end to end; no payment gateway or external money movement exists. All demonstrations use visibly labeled synthetic accounts, terms, receipts and attestations.
 
 | Capability | Current status | Owning implementation / limitation |
 |---|---|---|
 | DJ registration, contact verification, sign-in, reset, logout | EXISTS locally | `src/lib/auth.ts`, `src/app/api/[...path]/route.ts`; scrypt and hashed opaque tokens. Local mailbox only. |
-| DJ onboarding / public profile / package | EXISTS | `src/components/forms.tsx`, `src/app/dj/[slug]/page.tsx`, SQL `onboard/public_profiles`; one package configured at onboarding. Profile/package editing is next. |
+| DJ onboarding / public profile / package | EXISTS | One editable package; owner settings with stale revision protection and immutable prior snapshots. Stable slug, public toggle; existing agreements/prices/buffers preserved. |
 | Shared DJ link and client without account | EXISTS | Public route plus private fragment link exchanged for HttpOnly guest cookie. Save the private link; no email delivery/recovery service yet. |
 | Hold / buffers / blocked intervals / Free cap | EXISTS | `db/001_core.sql` plus clock refinements; per-DJ locks and GiST exclusion constraints. Three active Free bookings, UTC instants, Jamaica rendering. |
 | Signed immutable agreement | EXISTS | Exact snapshot, SHA-256 hash, version and typed signature with explicit acceptance. No legal-validity claim. |
@@ -19,7 +19,7 @@
 | Multi-tenant authorization and private files | EXISTS | RLS, restricted runtime role, server-only functions, guest capability reads, private attachment downloads. |
 | Local/CI test tooling | EXISTS | `scripts/local-db.ts`, migration ledger, `tests/booking.test.ts`, Playwright browser test and GitHub Actions. Fresh Linux/PostgreSQL CI passed. |
 | Subscriptions / manual invoices / founding seats | MISSING | All accounts currently Free; no self-service Pro bypass, invoice collection or bank data invented. |
-| Cancellations / refunds / reschedules | MISSING | Documented next vertical slice. No UI claims these operations are available. |
+| Cancellations / refunds / reschedules | EXISTS locally / bounded scope | `db/006_booking_changes.sql`, `booking-changes.tsx`: client request/DJ decision, refund obligation/transfer attestation/client receipt, two-party immutable date amendments. Upcoming active bookings only; expired-fund resolution, disputes and installments remain missing. |
 | Staff RBAC/MFA / moderation / privacy operations | MISSING | Launch blocker; no public staff route or fabricated admin controls. |
 | External messaging / real bank / legal/privacy approvals | BLOCKED | Requires authorized configuration and owner/legal decisions. |
 | Production application deployment | NOT PERFORMED | Explicitly outside authorization. Public Git repository is source sharing only. |
@@ -31,13 +31,22 @@
 - `db/003_agreement_snapshot.sql`: separate immutable payment-instruction snapshot, readable JMD agreement values, UTC agreement times, canonical reference uniqueness.
 - `db/004_creation_clock.sql`: holds start when allocated after locks; audit and verification timestamps use actual clock.
 - `db/005_token_purposes.sql`: single-purpose auth tokens and safe re-request of verification.
+- `db/006_booking_changes.sql`: profile revision/audit, agreement versioning, two-party amendments, cancellation/refund records, RLS and narrow authenticated functions; preserves existing data.
 - `src/lib/{db,auth,service,validation,http,format}.ts`: persistence, identity, image validation, server validation, request protection and presentation.
 - `src/app/` and `src/components/`: public discovery/profile, onboarding, auth/recovery, private client booking, DJ review and availability blocks.
 - `scripts/`: local PostgreSQL launcher, local-only atomic migrations, expiry worker.
 - `tests/`: PostgreSQL integration suite and end-to-end browser test.
 - `docs/ARCHITECTURE.md`, `docs/SECURITY.md`, `README.md`: runbook, decisions, trust boundaries and launch gates.
 
-## Verification evidence
+## Current verification evidence
+
+- Local database suite: **42 integration tests** covering the original slice plus settings isolation/stale writes, original snapshot preservation, two-party hash acceptance, simultaneous signatures, target-date collision rollback, amendment eligibility/expiry, cancellation outcomes, refund attestations and new-table RLS/immutability.
+- Full browser journey extended through profile editing, amendment proposal/client signature/DJ signature, cancellation request/approval, DJ refund attestation and client acknowledgement. Original agreement hash, original booked price and historical verified deposit remain unchanged. Final local run: **1 passed, 20.1s**, with refreshed screenshots and all six viewport checks.
+- Typecheck and lint passed. Optimized build passed with **15 routes**, and dependency audit reports **0 vulnerabilities**. Final revision is being rechecked in local and GitHub CI.
+- Figma MCP inspected BEX09 `80:322` and BEX10 `85:2`: exact amendment acceptance, preserved prior agreement, original reservation until approval and DJ-managed cancellation/refund status. Responsive application uses persisted data rather than illustrative Figma values.
+- New synthetic evidence: `docs/evidence/amended-mobile.png`, `cancelled-refund-mobile.png`, `cancelled-refund-desktop.png`. No private bearer links are shown.
+
+## Previous milestone verification
 
 - Public repository: https://github.com/tillmate/lockd (verified public, unauthenticated HTTP 200). Implementation commit `67afd7dfd52dd2516be88522af2d39f1b2f25015`.
 - **GitHub CI passed**: https://github.com/tillmate/lockd/actions/runs/42746431820 — fresh Ubuntu runner, PostgreSQL 18 service, clean dependency installation, migrations, typecheck, lint, 29 integration tests, Playwright browser journey, optimized build and vulnerability audit. Job duration: 1m24s. This report's final update changes documentation only.
@@ -55,7 +64,9 @@
 
 ## Remaining dependencies and next slice
 
-The exact next product slice is **DJ profile/package editing and cancellation/reschedule requests with immutable amendment history**, followed by manual subscription invoice reconciliation and founding allocation. Keep the existing signed original slot active until both parties accept an amendment. Do not add real collection details until the Lockd business account is verified and authorized.
+The next product slice is **manual subscription invoice reconciliation and founding allocation**, with scoped privileged review and no invented collection details or paid entitlement bypass. Verified Lockd business bank details and authorized staff identity/MFA are still needed before live collection. Existing booking functionality remains available on Free.
+
+Current change limits: complimentary amendments keep venue/service/price fixed, expire after 48 hours, and reserve no target slot until both signatures. Interpret within 90 days relative to the original date, in either direction. Client cancellation refund defaults are suggestions pending legal validation; explicit DJ contract/legal basis is required. DJ cancellation enforces 100% return of actual verified funds. Positive refunds use a conservative seven-calendar-day deadline, within seven business days. No external funds or messages move. See ADR 007/008 for the full rationale and remaining dispute/expired-booking cases.
 
 Before public application release: authorized email transport with retry/delivery audits; managed DB/backup and storage operations; staff MFA and listing review; stronger anonymous hold-abuse prevention; strict production CSP; signed legal/privacy/retention policy; independently reviewed deployment. See `docs/SECURITY.md` for exact boundaries.
 

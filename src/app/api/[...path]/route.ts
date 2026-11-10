@@ -80,6 +80,10 @@ export async function POST(req: NextRequest, { params }: Params) {
       const id = await service.onboard(ctx, parse());
       return NextResponse.json({ id });
     }
+    if (route === 'settings') {
+      await service.updateProfile(ctx, parse());
+      return NextResponse.json({ ok: true });
+    }
     if (route === 'holds') {
       const d = z
         .object({ creatorId: z.uuid(), clientEmail: z.email(), accessToken: capability })
@@ -125,6 +129,17 @@ export async function POST(req: NextRequest, { params }: Params) {
       } else if (action === 'verify')
         return NextResponse.json({ status: await service.verify(ctx, bid, parse()) });
       else if (action === 'complete') await service.complete(ctx, bid);
+      else if (action === 'propose-change') {
+        await limit(`changes:${bid}`, 30);
+        await service.proposeChange(ctx, bid, parse());
+      } else if (action === 'respond-change') await service.respondChange(ctx, bid, parse());
+      else if (action === 'request-cancellation') {
+        await limit(`cancellations:${bid}`, 15);
+        await service.requestCancellation(ctx, bid, parse());
+      } else if (action === 'decide-cancellation')
+        await service.decideCancellation(ctx, bid, parse());
+      else if (action === 'record-refund') await service.recordRefund(ctx, bid, parse());
+      else if (action === 'acknowledge-refund') await service.acknowledgeRefund(ctx, bid, parse());
       else return NextResponse.json({ error: 'Not found' }, { status: 404 });
       return NextResponse.json({ ok: true });
     }

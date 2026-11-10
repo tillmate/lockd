@@ -134,6 +134,45 @@ const decision = (claimId: string, amountMinor = 2750000) => ({
   reason: 'Synthetic attestation in isolated automated test',
   attest: true,
 });
+async function confirmedFixture() {
+  const f = await fixture(),
+    h = await claimed(f);
+  await s.verify({ session: f.session }, h.id, decision(h.claim));
+  return { f, h };
+}
+async function propose(f: Fixture, h: Awaited<ReturnType<typeof held>>, days = 40) {
+  return s.proposeChange(h.ctx, h.id, {
+    party: 'client',
+    startsAt: input(f, days).startsAt,
+    reason: 'Synthetic change request',
+  });
+}
+async function acceptChange(
+  ctx: Parameters<typeof s.respondChange>[0],
+  h: Awaited<ReturnType<typeof held>>,
+  mid: string,
+  party: 'dj' | 'client',
+) {
+  const b = (await s.booking(ctx, h.id))!,
+    m = b.amendments.find((m) => m.id === mid)!,
+    a = b.agreements.find((a) => a.id === m.agreement_id)!;
+  return s.respondChange(ctx, h.id, {
+    amendmentId: mid,
+    party,
+    action: 'accept',
+    contentHash: a.content_hash,
+    signer: party === 'client' ? 'Synthetic Client' : 'Synthetic DJ',
+    accept: true,
+  });
+}
+const cancelDecision = (requestId: string | null, refundMinor = 1375000) => ({
+  requestId,
+  approve: true,
+  refundMinor,
+  reason: 'Synthetic cancellation review',
+  basis: 'Synthetic agreed refund basis for automated test only.',
+  attest: true,
+});
 async function expiry(id: string, remainingSeconds: number, grace = false) {
   await admin.query(
     "UPDATE lockd.bookings SET created_at=now()+make_interval(secs=>$2)-interval '48 hours',original_expires_at=now()+make_interval(secs=>$2),expires_at=now()+make_interval(secs=>$2)+CASE WHEN $3 THEN interval '24 hours' ELSE interval '0 hours' END,grace_used=$3 WHERE id=$1",
@@ -569,5 +608,357 @@ describe('PostgreSQL booking slice', () => {
     expect(await verifyEmail(second)).toBe(true);
     expect(await login({ email, password: 'Original-password-123!' })).toHaveLength(64);
     await expect(login({ email, password: 'Replacement-password-123!' })).rejects.toThrow();
+  });
+  it('edits profile atomically with stale-write protection, preserving booked prices, buffers and signed snapshots', async () => {
+    const { f, h } = await confirmedFixture(),
+      before = (await s.booking(h.ctx, h.id))!,
+      v = (await s.settings({ session: f.session }))!;
+    const slot = (
+      await admin.query('SELECT slot::text FROM lockd.occupied_slots WHERE booking_id=$1', [h.id])
+    ).rows[0].slot;
+    await s.updateProfile(
+      { session: f.session },
+      {
+        ...v,
+        stageName: 'Updated Synthetic DJ',
+        priceMinor: 6000000,
+        agreement: 'Replacement synthetic terms, for new bookings only.',
+        bufferBefore: 120,
+      },
+    );
+    expect((await s.profiles(f.profile.slug))[0].stageName).toBe('Updated Synthetic DJ');
+    expect((await s.booking(h.ctx, h.id))!.agreement).toEqual(before.agreement);
+    expect((await s.booking(h.ctx, h.id))!.price_minor).toBe(5500000);
+    expect(
+      (await admin.query('SELECT slot::text FROM lockd.occupied_slots WHERE booking_id=$1', [h.id]))
+        .rows[0].slot,
+    ).toBe(slot);
+    await expect(s.updateProfile({ session: f.session }, v)).rejects.toThrow(/Reload/);
+    const current = (await s.settings({ session: f.session }))!;
+    await s.updateProfile({ session: f.session }, { ...current, published: false });
+    expect(await s.profiles(f.profile.slug)).toEqual([]);
+    expect(await s.booking(h.ctx, h.id)).not.toBeNull();
+    await expect(s.createHold(input(f, 50))).rejects.toThrow(/not available/);
+    await expect(
+      admin.query('DELETE FROM lockd.account_changes WHERE account_id=$1', [f.account]),
+    ).rejects.toThrow(/Immutable/);
+  });
+  it('rejects cross-owner settings writes and never exposes private settings to a client', async () => {
+    const f = await fixture(),
+      other = await fixture(),
+      v = (await s.settings({ session: f.session }))!;
+    expect(await s.settings({})).toBeNull();
+    await expect(s.updateProfile({}, v)).rejects.toThrow(/access/);
+    const own = (await s.settings({ session: other.session }))!;
+    await expect(
+      s.updateProfile({ session: other.session }, { ...own, packageId: v.packageId }),
+    ).rejects.toThrow(/access/);
+    await expect(
+      s.updateProfile({ session: f.session }, { ...v, slug: 'changed-address' }),
+    ).rejects.toThrow(/address/);
+  });
+  it('requires both exact signatures, atomically moves buffers, and retains original agreement and deposit', async () => {
+    const { f, h } = await confirmedFixture(),
+      before = (await s.booking(h.ctx, h.id))!,
+      mid = await propose(f, h);
+    await acceptChange(h.ctx, h, mid, 'client');
+    expect((await s.booking(h.ctx, h.id))!.starts_at).toEqual(before.starts_at);
+    const a = (await s.booking(h.ctx, h.id))!.agreements[1];
+    await expect(
+      s.respondChange({ session: f.session }, h.id, {
+        amendmentId: mid,
+        party: 'dj',
+        action: 'accept',
+        contentHash: 'a'.repeat(64),
+        signer: 'Synthetic DJ',
+        accept: true,
+      }),
+    ).rejects.toThrow(/exact/);
+    await acceptChange({ session: f.session }, h, mid, 'dj');
+    await acceptChange({ session: f.session }, h, mid, 'dj');
+    const after = (await s.booking(h.ctx, h.id))!;
+    expect(after.agreement.id).toBe(a.id);
+    expect(after.agreement.version).toBe(2);
+    expect(after.agreements[0]).toEqual(before.agreement);
+    expect(after.reschedules_used).toBe(1);
+    expect(after.status).toBe('CONFIRMED_LOCKD');
+    expect(after.verified_minor).toBe(before.verified_minor);
+    expect(after.amendments[0].acceptances).toHaveLength(2);
+    expect(after.events.filter((e) => e.kind === 'DATE_CHANGE_APPLIED')).toHaveLength(1);
+    const slot = (
+      await admin.query(
+        'SELECT lower(slot) AS start,upper(slot) AS finish FROM lockd.occupied_slots WHERE booking_id=$1',
+        [h.id],
+      )
+    ).rows[0];
+    expect(new Date(after.starts_at).getTime() - slot.start.getTime()).toBe(3600000);
+    expect(slot.finish.getTime() - new Date(after.ends_at).getTime()).toBe(3600000);
+    await expect(propose(f, h, 60)).rejects.toThrow(/One complimentary/);
+    await expect(
+      admin.query('UPDATE lockd.amendment_acceptances SET signer=$1 WHERE amendment_id=$2', [
+        'Tampered',
+        mid,
+      ]),
+    ).rejects.toThrow(/Immutable/);
+    await expect(
+      admin.query('UPDATE lockd.amendments SET reason=$1 WHERE id=$2', ['Tampered', mid]),
+    ).rejects.toThrow(/Immutable/);
+  });
+  it('keeps original slot and rolls back final acceptance if the proposed date is taken', async () => {
+    const { f, h } = await confirmedFixture(),
+      before = (await s.booking(h.ctx, h.id))!,
+      mid = await propose(f, h);
+    const m = (await s.booking(h.ctx, h.id))!.amendments[0];
+    await acceptChange(h.ctx, h, mid, 'client');
+    await s.block(
+      { session: f.session },
+      {
+        startsAt: new Date(m.new_start).toISOString(),
+        endsAt: new Date(m.new_end).toISOString(),
+        reason: 'External engagement after proposal',
+      },
+    );
+    await expect(acceptChange({ session: f.session }, h, mid, 'dj')).rejects.toMatchObject({
+      code: '23P01',
+    });
+    const after = (await s.booking(h.ctx, h.id))!;
+    expect(after.starts_at).toEqual(before.starts_at);
+    expect(after.amendments[0].acceptances).toHaveLength(1);
+    expect(after.agreement_version).toBe(1);
+    expect(after.reschedules_used).toBe(0);
+    await expect(
+      s.createHold({ ...input(f), startsAt: new Date(before.starts_at).toISOString() }),
+    ).rejects.toMatchObject({ code: '23P01' });
+  });
+  it('serializes simultaneous signatures to apply an amendment exactly once', async () => {
+    const { f, h } = await confirmedFixture(),
+      mid = await propose(f, h);
+    await Promise.all([
+      acceptChange(h.ctx, h, mid, 'client'),
+      acceptChange({ session: f.session }, h, mid, 'dj'),
+    ]);
+    const b = (await s.booking(h.ctx, h.id))!;
+    expect(b.amendments[0].state).toBe('applied');
+    expect(b.events.filter((e) => e.kind === 'DATE_CHANGE_APPLIED')).toHaveLength(1);
+  });
+  it('declines and replaces proposals without consuming the complimentary move', async () => {
+    const { f, h } = await confirmedFixture(),
+      mid = await propose(f, h),
+      b = (await s.booking(h.ctx, h.id))!;
+    await s.respondChange({ session: f.session }, h.id, {
+      amendmentId: mid,
+      party: 'dj',
+      action: 'decline',
+      contentHash: b.agreements[1].content_hash,
+      signer: '',
+      accept: false,
+    });
+    await expect(acceptChange(h.ctx, h, mid, 'client')).rejects.toThrow(/no longer pending/);
+    await propose(f, h, 50);
+    const after = (await s.booking(h.ctx, h.id))!;
+    expect(after.reschedules_used).toBe(0);
+    expect(after.agreements).toHaveLength(3);
+    expect(after.agreement_version).toBe(1);
+  });
+  it('rejects ineligible dates, short notice, forged party and foreign amendment access', async () => {
+    const { f, h } = await confirmedFixture(),
+      other = await fixture();
+    await expect(propose(f, h, 130)).rejects.toThrow(/within 90/);
+    await expect(propose(f, h, 1)).rejects.toThrow(/72 hours/);
+    await expect(
+      s.proposeChange(h.ctx, h.id, {
+        party: 'dj',
+        startsAt: input(f, 40).startsAt,
+        reason: 'Forged role',
+      }),
+    ).rejects.toMatchObject({ code: '42501' });
+    const mid = await propose(f, h);
+    await expect(
+      s.respondChange({ session: other.session }, h.id, {
+        amendmentId: mid,
+        party: 'dj',
+        action: 'accept',
+        contentHash: 'a'.repeat(64),
+        signer: 'Other DJ',
+        accept: true,
+      }),
+    ).rejects.toMatchObject({ code: '42501' });
+    const rows = await transaction(
+      { session: other.session },
+      async (c) => (await c.query('SELECT * FROM lockd.amendments')).rows,
+    );
+    expect(rows).toEqual([]);
+    const near = await signed(other, 10),
+      claim = await s.proof(near.ctx, near.id, 'Near date', 2750000, await png());
+    await s.verify({ session: other.session }, near.id, decision(claim));
+    await expect(propose(other, near, 50)).rejects.toThrow(/14 days/);
+  });
+  it('keeps reservation through a cancellation request, then releases it and records a distinct refund workflow', async () => {
+    const { f, h } = await confirmedFixture(),
+      before = (await s.booking(h.ctx, h.id))!,
+      rid = await s.requestCancellation(h.ctx, h.id, { reason: 'Synthetic client cancellation' });
+    expect(await s.requestCancellation(h.ctx, h.id, { reason: 'Repeated request' })).toBe(rid);
+    expect((await s.booking(h.ctx, h.id))!.status).toBe('CONFIRMED_LOCKD');
+    await expect(
+      s.createHold({ ...input(f), startsAt: new Date(before.starts_at).toISOString() }),
+    ).rejects.toMatchObject({ code: '23P01' });
+    const d = cancelDecision(rid);
+    await s.decideCancellation({ session: f.session }, h.id, d);
+    await s.decideCancellation({ session: f.session }, h.id, d);
+    let b = (await s.booking(h.ctx, h.id))!;
+    expect(b.status).toBe('CANCELLED');
+    expect(b.decisions).toHaveLength(1);
+    expect(b.decisions[0].suggested_minor).toBe(1375000);
+    expect(b.verified_minor).toBe(2750000);
+    expect(b.agreement).toEqual(before.agreement);
+    const did = b.decisions[0].id;
+    expect(b.decisions[0].refund_reference).toBeNull();
+    await expect(
+      s.acknowledgeRefund(h.ctx, h.id, { decisionId: did, attest: true }),
+    ).rejects.toThrow(/after the DJ/);
+    await expect(
+      s.recordRefund(h.ctx, h.id, { decisionId: did, reference: 'Fake refund', attest: true }),
+    ).rejects.toMatchObject({ code: '42501' });
+    await s.recordRefund({ session: f.session }, h.id, {
+      decisionId: did,
+      reference: 'SYNTHETIC-REFUND',
+      attest: true,
+    });
+    b = (await s.booking(h.ctx, h.id))!;
+    expect(b.decisions[0].acknowledged_at).toBeNull();
+    await s.acknowledgeRefund(h.ctx, h.id, { decisionId: did, attest: true });
+    await s.acknowledgeRefund(h.ctx, h.id, { decisionId: did, attest: true });
+    expect(
+      (await s.booking(h.ctx, h.id))!.events.filter(
+        (e) => e.kind === 'REFUND_RECEIPT_ACKNOWLEDGED',
+      ),
+    ).toHaveLength(1);
+    expect(
+      await s.createHold({ ...input(f), startsAt: new Date(before.starts_at).toISOString() }),
+    ).toBeTruthy();
+    await expect(
+      admin.query('DELETE FROM lockd.cancellation_decisions WHERE id=$1', [did]),
+    ).rejects.toThrow(/Immutable/);
+  });
+  it('requires full actual funds return for DJ cancellation and preserves cancelled amendment history', async () => {
+    const { f, h } = await confirmedFixture();
+    await propose(f, h);
+    await expect(
+      s.decideCancellation({ session: f.session }, h.id, cancelDecision(null, 1375000)),
+    ).rejects.toThrow(/full return/);
+    await expect(
+      s.decideCancellation(h.ctx, h.id, cancelDecision(null, 2750000)),
+    ).rejects.toMatchObject({ code: '42501' });
+    await s.decideCancellation({ session: f.session }, h.id, cancelDecision(null, 2750000));
+    const b = (await s.booking(h.ctx, h.id))!;
+    expect(b.amendments[0].state).toBe('cancelled');
+    expect(b.decisions[0].refund_minor).toBe(2750000);
+    expect(
+      new Date(b.decisions[0].due_at!).getTime() - new Date(b.decisions[0].created_at).getTime(),
+    ).toBeGreaterThan(7 * 86400000 - 2000);
+    expect(
+      new Date(b.decisions[0].due_at!).getTime() - new Date(b.decisions[0].created_at).getTime(),
+    ).toBeLessThanOrEqual(7 * 86400000);
+  });
+  it('declines cancellation without releasing dates and blocks amendments while cancellation is pending', async () => {
+    const { f, h } = await confirmedFixture(),
+      mid = await propose(f, h),
+      rid = await s.requestCancellation(h.ctx, h.id, { reason: 'Please review cancellation' });
+    await expect(acceptChange({ session: f.session }, h, mid, 'dj')).rejects.toThrow(
+      /cancellation request/,
+    );
+    await s.decideCancellation({ session: f.session }, h.id, {
+      ...cancelDecision(rid, 0),
+      approve: false,
+    });
+    expect((await s.booking(h.ctx, h.id))!.status).toBe('CONFIRMED_LOCKD');
+    await acceptChange({ session: f.session }, h, mid, 'dj');
+    await acceptChange(h.ctx, h, mid, 'client');
+    expect((await s.booking(h.ctx, h.id))!.amendments[0].state).toBe('applied');
+  });
+  it('uses client request timestamp for the 14-day refund suggestion, not later review time', async () => {
+    const f = await fixture(),
+      h = await signed(f, 10),
+      cid = await s.proof(h.ctx, h.id, 'Synthetic near date', 2750000, await png());
+    await s.verify({ session: f.session }, h.id, decision(cid));
+    const rid = await s.requestCancellation(h.ctx, h.id, { reason: 'Synthetic late cancellation' });
+    await s.decideCancellation({ session: f.session }, h.id, cancelDecision(rid, 0));
+    const b = (await s.booking(h.ctx, h.id))!;
+    expect(b.decisions[0].suggested_minor).toBe(0);
+    expect(b.decisions[0].due_at).toBeNull();
+  });
+  it('rejects unsigned refund attestations and isolates all new tables and functions', async () => {
+    const { f, h } = await confirmedFixture(),
+      other = await fixture(),
+      rid = await s.requestCancellation(h.ctx, h.id, { reason: 'Synthetic test cancellation' });
+    await expect(
+      s.decideCancellation({ session: f.session }, h.id, { ...cancelDecision(rid), attest: false }),
+    ).rejects.toThrow();
+    await expect(
+      s.decideCancellation({ session: other.session }, h.id, cancelDecision(rid)),
+    ).rejects.toMatchObject({ code: '42501' });
+    await expect(
+      s.decideCancellation({ session: f.session }, h.id, cancelDecision(rid, 3000000)),
+    ).rejects.toMatchObject({ code: '23514' });
+    await s.decideCancellation({ session: f.session }, h.id, cancelDecision(rid));
+    const tables = [
+      'cancellation_requests',
+      'cancellation_decisions',
+      'refund_records',
+      'refund_acknowledgements',
+      'amendments',
+      'amendment_acceptances',
+      'account_changes',
+    ];
+    for (const table of tables) {
+      expect(
+        await transaction(
+          { session: other.session },
+          async (c) => (await c.query(`SELECT * FROM lockd.${table}`)).rows,
+        ),
+      ).toEqual([]);
+      await expect(
+        transaction({ session: f.session }, async (c) => c.query(`DELETE FROM lockd.${table}`)),
+      ).rejects.toMatchObject({ code: '42501' });
+    }
+    await expect(
+      transaction({ session: f.session }, async (c) =>
+        c.query(
+          "SELECT lockd.change_event(b,'FORGED','forged','{}') FROM lockd.bookings b WHERE id=$1",
+          [h.id],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: '42501' });
+  });
+  it('expires amendment acceptance after 48 hours and preserves the original reservation', async () => {
+    const { f, h } = await confirmedFixture(),
+      before = (await s.booking(h.ctx, h.id))!,
+      mid = await propose(f, h);
+    await acceptChange(h.ctx, h, mid, 'client');
+    // Only the isolated test database clock fixture can rewrite proposal timestamps.
+    await admin.query('BEGIN');
+    try {
+      await admin.query('ALTER TABLE lockd.amendments DISABLE TRIGGER amendments_history');
+      await admin.query(
+        "UPDATE lockd.amendments SET created_at=now()-interval '49 hours',expires_at=now()-interval '49 hours'+interval '48 hours' WHERE id=$1",
+        [mid],
+      );
+      await admin.query('ALTER TABLE lockd.amendments ENABLE TRIGGER amendments_history');
+      await admin.query('COMMIT');
+    } catch (e) {
+      await admin.query('ROLLBACK');
+      throw e;
+    }
+    await expect(acceptChange({ session: f.session }, h, mid, 'dj')).rejects.toThrow(
+      /no longer pending/,
+    );
+    let b = (await s.booking(h.ctx, h.id))!;
+    expect(b.starts_at).toEqual(before.starts_at);
+    expect(b.amendments[0].state).toBe('expired');
+    expect(b.reschedules_used).toBe(0);
+    await propose(f, h, 50);
+    b = (await s.booking(h.ctx, h.id))!;
+    expect(b.agreements).toHaveLength(3);
+    expect(b.amendments[0].state).toBe('expired');
   });
 });

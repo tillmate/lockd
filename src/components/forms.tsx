@@ -4,7 +4,7 @@ import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { moneyToMinor, parishNames } from '@/lib/validation';
 import { money } from '@/lib/format';
-import type { Profile } from '@/lib/service';
+import type { Profile, Settings } from '@/lib/service';
 export async function api(path: string, data: unknown) {
   const res = await fetch(`/api/${path}`, {
     method: 'POST',
@@ -217,7 +217,7 @@ export function ForgotForm() {
     </form>
   );
 }
-export function OnboardForm() {
+export function OnboardForm({ initial }: { initial?: Settings }) {
   const [busy, setBusy] = useState(false),
     [error, setError] = useState('');
   const router = useRouter();
@@ -227,8 +227,15 @@ export function OnboardForm() {
     setError('');
     try {
       const d = new FormData(e.currentTarget);
-      await api('onboard', {
+      await api(initial ? 'settings' : 'onboard', {
         ...Object.fromEntries(d),
+        ...(initial
+          ? {
+              packageId: initial.packageId,
+              revision: initial.revision,
+              published: d.get('published') === 'on',
+            }
+          : {}),
         priceMinor: moneyToMinor(val(d, 'price')),
         depositMinor: moneyToMinor(val(d, 'deposit')),
         durationMinutes: Number(d.get('durationMinutes')),
@@ -248,41 +255,75 @@ export function OnboardForm() {
       <section className="card form">
         <p className="eyebrow">01 / YOUR PUBLIC PROFILE</p>
         <h2>Meet your clients.</h2>
-        <Field label="Stage name" name="stageName" maxLength={100} />
+        <Field
+          label="Stage name"
+          name="stageName"
+          maxLength={100}
+          defaultValue={initial?.stageName}
+        />
         <Field
           label="Booking page address"
           name="slug"
           pattern="[a-z0-9][a-z0-9-]{2,49}"
           placeholder="your-dj-name"
+          defaultValue={initial?.slug}
+          readOnly={!!initial}
         />
         <p className="fine">Lowercase letters, numbers and hyphens. /dj/your-dj-name</p>
         <label className="field">
           <span>Parish</span>
-          <select name="parish">
+          <select name="parish" defaultValue={initial?.parish}>
             {parishNames.map((p) => (
               <option key={p}>{p}</option>
             ))}
           </select>
         </label>
-        <Area label="About your sound" name="bio" minLength={10} maxLength={1500} />
+        <Area
+          label="About your sound"
+          name="bio"
+          minLength={10}
+          maxLength={1500}
+          defaultValue={initial?.bio}
+        />
+        {initial && (
+          <label className="check">
+            <input type="checkbox" name="published" defaultChecked={initial.published} />
+            <span>
+              Public page accepts new bookings. Turning this off preserves existing bookings.
+            </span>
+          </label>
+        )}
       </section>
       <section className="card form">
         <p className="eyebrow">02 / YOUR FIRST PACKAGE</p>
         <h2>Set the stage.</h2>
-        <Field label="Package name" name="packageName" maxLength={120} />
-        <Area label="What’s included" name="description" minLength={10} maxLength={500} />
+        <Field
+          label="Package name"
+          name="packageName"
+          maxLength={120}
+          defaultValue={initial?.packageName}
+        />
+        <Area
+          label="What’s included"
+          name="description"
+          minLength={10}
+          maxLength={500}
+          defaultValue={initial?.description}
+        />
         <div className="two">
           <Field
             label="Total price (JMD)"
             name="price"
             inputMode="decimal"
             placeholder="55000.00"
+            defaultValue={initial ? (initial.priceMinor / 100).toFixed(2) : undefined}
           />
           <Field
             label="Required deposit (JMD)"
             name="deposit"
             inputMode="decimal"
             placeholder="27500.00"
+            defaultValue={initial ? (initial.depositMinor / 100).toFixed(2) : undefined}
           />
         </div>
         <Field
@@ -291,7 +332,7 @@ export function OnboardForm() {
           type="number"
           min={30}
           max={1440}
-          defaultValue={240}
+          defaultValue={initial?.durationMinutes ?? 240}
         />
         <div className="two">
           <Field
@@ -300,7 +341,7 @@ export function OnboardForm() {
             type="number"
             min={0}
             max={720}
-            defaultValue={60}
+            defaultValue={initial?.bufferBefore ?? 60}
           />
           <Field
             label="Pack-down / travel after (minutes)"
@@ -308,7 +349,7 @@ export function OnboardForm() {
             type="number"
             min={0}
             max={720}
-            defaultValue={60}
+            defaultValue={initial?.bufferAfter ?? 60}
           />
         </div>
       </section>
@@ -318,6 +359,7 @@ export function OnboardForm() {
         <Area
           label="Your direct deposit instructions"
           name="depositInstructions"
+          defaultValue={initial?.depositInstructions}
           minLength={10}
           maxLength={2000}
           placeholder="Payment rail, recipient name and payment instructions. Use synthetic instructions while testing."
@@ -329,6 +371,7 @@ export function OnboardForm() {
         <Area
           label="Your booking agreement"
           name="agreement"
+          defaultValue={initial?.agreement}
           minLength={20}
           maxLength={12000}
           rows={10}
@@ -340,7 +383,9 @@ export function OnboardForm() {
       </section>
       <div className="form">
         <Notice error={error} />
-        <Submit busy={busy}>Publish my local booking page ↗</Submit>
+        <Submit busy={busy}>
+          {initial ? 'Save profile and package' : 'Publish my local booking page ↗'}
+        </Submit>
       </div>
     </form>
   );

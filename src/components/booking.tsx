@@ -5,6 +5,7 @@ import type { Booking } from '@/lib/service';
 import { date, money, statusLabel } from '@/lib/format';
 import { moneyToMinor } from '@/lib/validation';
 import { api, Area, Field, Notice, Submit } from './forms';
+import { BookingChanges } from './booking-changes';
 export function BookingAccess({ id }: { id: string }) {
   const [data, setData] = useState<Booking | null>(null),
     [error, setError] = useState(''),
@@ -77,9 +78,11 @@ export function BookingView({
           <h1>
             {confirmed
               ? 'Date, Lockd.'
-              : expired
-                ? 'Let’s find a way forward.'
-                : 'Your event is taking shape.'}
+              : b.status === 'CANCELLED'
+                ? 'Booking cancelled.'
+                : expired
+                  ? 'Let’s find a way forward.'
+                  : 'Your event is taking shape.'}
           </h1>
         </div>
         <span className={`pill ${confirmed ? 'success' : ''}`}>{statusLabel(b.status)}</span>
@@ -125,6 +128,14 @@ export function BookingView({
             reserved.
           </p>
         </div>
+      ) : b.status === 'CANCELLED' ? (
+        <div className="notice">
+          <strong>The date has been released.</strong>
+          <p>
+            Signed agreements and payment history remain available. Any refund is managed directly
+            by the DJ; see the cancellation record below.
+          </p>
+        </div>
       ) : expired ? (
         <div className="notice error">
           <strong>Your slot has been released.</strong>
@@ -168,7 +179,7 @@ export function BookingView({
             </dl>
           </section>
           <section className="card">
-            <p className="eyebrow">IMMUTABLE AGREEMENT · VERSION 1</p>
+            <p className="eyebrow">IMMUTABLE AGREEMENT · VERSION {b.agreement.version}</p>
             <h2>The details, agreed.</h2>
             <pre className="agreement">{b.agreement.body}</pre>
             <p className="fine hash">Content hash: {b.agreement.content_hash}</p>
@@ -177,21 +188,46 @@ export function BookingView({
                 Signed by {b.agreement.signer} on {date(b.agreement.accepted_at!)}.
               </div>
             ) : (
-              !dj && !expired && <SignForm b={b} refresh={refresh} />
+              !dj && b.status === 'AWAITING_SIGNATURE' && <SignForm b={b} refresh={refresh} />
             )}
           </section>
+          {b.agreements
+            .filter((a) => a.id !== b.agreement.id)
+            .map((a) => (
+              <details className="card" key={a.id}>
+                <summary>
+                  Preserved agreement · version {a.version}
+                  {a.signer ? ' · signed' : ' · proposed'}
+                </summary>
+                <pre className="agreement">{a.body}</pre>
+                <p className="fine hash">SHA-256: {a.content_hash}</p>
+                {a.signer && (
+                  <p>
+                    Signed by {a.signer} on {date(a.accepted_at!)}.
+                  </p>
+                )}
+              </details>
+            ))}
         </div>
         <div className="form">
           <section className="card">
             <p className="eyebrow">DIRECT TO YOUR DJ</p>
-            <h2>Secure your date.</h2>
+            <h2>{b.status === 'CANCELLED' ? 'Your payment history.' : 'Secure your date.'}</h2>
             <div className="ink-panel deposit">
-              <p className="eyebrow">DEPOSIT DUE DIRECTLY TO THE DJ</p>
+              <p className="eyebrow">
+                {b.status === 'CANCELLED'
+                  ? 'ORIGINAL AGREED DEPOSIT'
+                  : 'DEPOSIT DUE DIRECTLY TO THE DJ'}
+              </p>
               <strong>{money(b.deposit_minor)}</strong>
               <p>Of {money(b.price_minor)} total service fee</p>
             </div>
             <div className="note">
-              <strong>Direct payment instructions</strong>
+              <strong>
+                {b.status === 'CANCELLED'
+                  ? 'Original payment instructions · archived'
+                  : 'Direct payment instructions'}
+              </strong>
               <p className="instructions">
                 {b.agreement.payment_instructions ||
                   b.agreement.body.slice(
@@ -202,8 +238,9 @@ export function BookingView({
             </div>
             <h3>Deposit evidence</h3>
             <p>
-              Follow the DJ’s payment instructions in the agreement. A receipt is a claim; the DJ
-              checks their own account before confirming.
+              {b.status === 'CANCELLED'
+                ? 'This booking is cancelled. Do not send further deposits. Existing evidence and verification decisions remain recorded.'
+                : 'Follow the DJ’s payment instructions in the agreement. A receipt is a claim; the DJ checks their own account before confirming.'}
             </p>
             {!b.agreement.signer ? (
               <div className="note">Sign the agreement before uploading evidence.</div>
@@ -233,7 +270,7 @@ export function BookingView({
                       Verified: {money(c.amount_minor ?? 0)} · {c.reason}
                     </p>
                   )}
-                  {dj && !c.decision && !confirmed && (
+                  {dj && !c.decision && !confirmed && b.status !== 'CANCELLED' && (
                     <VerifyForm b={b} claimId={c.id} refresh={refresh} />
                   )}
                 </article>
@@ -269,6 +306,7 @@ export function BookingView({
           )}
         </div>
       </div>
+      <BookingChanges b={b} dj={dj} refresh={refresh} />
       {dj && <Link href="/dashboard">← All bookings</Link>}
     </div>
   );
