@@ -21,7 +21,7 @@ Keep that terminal running. It creates a local database, applies migrations, gen
 npm run dev
 ```
 
-Open [local Lockd](http://127.0.0.1:3100). Optionally run `npm run worker` in a third terminal for expiry every 30 seconds. Expiry also runs transactionally on booking reads and allocation; a stopped worker cannot cause a double booking.
+Open [local Lockd](http://127.0.0.1:3100). Run `npm run worker` in a third terminal: it delivers queued email to the local **Test mailbox** (nothing is sent externally), queues reminders and expires holds every 30 seconds. Expiry also runs transactionally on booking reads and allocation; a stopped worker cannot cause a double booking, and queued email waits until it restarts.
 
 1. Create a synthetic DJ account with an `example.test` email and a password of at least 12 characters.
 2. Open **Test mailbox**, follow the verification link, verify and sign in.
@@ -45,7 +45,11 @@ This command only accepts a loopback database in explicit local mode and a synth
 
 As a different DJ, choose **Subscription** from the dashboard and request a monthly/annual invoice, or obtain staff founding eligibility approval before selecting Founding. Upload synthetic evidence. Paid access remains inactive until the independent reviewer verifies the actual bank receipt in the synthetic test. The review records a statement and never calls a bank. Founder allocation occurs only after full verification; receipt timing controls the seven-day renewal rule. See ADR 009/010 for exact behavior and exception limits. Production staff/bank configuration requires a separately approved release; do not repurpose this test setup for live collection.
 
-All mailbox messages stay on disk. No email or financial provider is connected. Test links are fragment-based and removed from browser history when exchanged for an HttpOnly cookie. Do not share them publicly.
+All mailbox messages stay on disk. No financial provider is connected, and no real email provider is configured. Test links are fragment-based and removed from browser history when exchanged for an HttpOnly cookie. Do not share them publicly.
+
+### Email delivery
+
+The worker delivers every booking, agreement, payment-verification, change/cancellation/refund and subscription message plus reminders (see ADR 011). Locally `EMAIL_PROVIDER=local` renders them into the Test mailbox. For a staging trial of real delivery, set on the worker host: `EMAIL_PROVIDER=resend`, `RESEND_API_KEY`, `EMAIL_FROM` (a verified sending domain), an `https` `APP_ORIGIN`, `NOTIFIER_DATABASE_URL`, `NOTIFICATION_KEY` (same value as the web app) and `EMAIL_ALLOWED_DOMAINS` to restrict recipients. `GET http://127.0.0.1:3101/health` reports worker status. A client who loses their private link can request a fresh one on the booking page.
 
 ## Verification
 
@@ -70,7 +74,7 @@ Integration tests create and drop a uniquely named **local test database**, appl
 - Scrypt password hashes; 256-bit session and client-access tokens stored as SHA-256 hashes. Verified DJ email required before onboarding. Password resets invalidate sessions.
 - Private image evidence in PostgreSQL `bytea`, under the same RLS as its booking. Size/signature/decoder checks, pixel limits and PNG re-encoding remove image metadata. Downloads require the owning DJ session or matching guest token and use no-store responses.
 - Agreements, signatures, claims, verification decisions and booking events are append-only. Signed content includes the exact service, price, time, venue and direct-payment instructions.
-- Durable transactional notification outbox; **external delivery is not implemented**. Account verification/reset use an explicit loopback-only local mailbox adapter. The client sees confirmation immediately on the private page (30-second polling, or reload).
+- Durable transactional outbox delivered by a separate least-privilege worker role with leases, retries/backoff, provider idempotency and an immutable attempt log. Local mailbox and Resend transports; link tokens encrypted while queued. The client also sees confirmation on the private page (30-second polling, or reload).
 - Integer JMD minor units and UTC timestamps; UI input/output uses `America/Jamaica` (UTC−05:00).
 
 Read [implementation status](IMPLEMENTATION_STATUS.md), [architecture decisions](docs/ARCHITECTURE.md), [security boundaries](docs/SECURITY.md), and the supplied [handover](LOCKD_CODEX_HANDOVER.md).

@@ -17,8 +17,10 @@ jobs:
     env:
       MIGRATION_DATABASE_URL: postgresql://postgres:local_ci_only@127.0.0.1:5432/lockd
       DATABASE_URL: postgresql://lockd_runtime:runtime_ci_only@127.0.0.1:5432/lockd
+      NOTIFIER_DATABASE_URL: postgresql://lockd_notifier:notifier_ci_only@127.0.0.1:5432/lockd
       APP_ORIGIN: http://127.0.0.1:3100
       LOCKD_LOCAL_ONLY: '1'
+      EMAIL_PROVIDER: local
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -26,10 +28,10 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci
-      - name: Generate ephemeral test MFA encryption key
-        run: node --input-type=module -e "import {randomBytes} from 'node:crypto'; import {appendFileSync} from 'node:fs'; appendFileSync(process.env.GITHUB_ENV, 'STAFF_MFA_KEY='+randomBytes(32).toString('hex')+'\n');"
+      - name: Generate ephemeral test MFA and notification encryption keys
+        run: node --input-type=module -e "import {randomBytes} from 'node:crypto'; import {appendFileSync} from 'node:fs'; appendFileSync(process.env.GITHUB_ENV, 'STAFF_MFA_KEY='+randomBytes(32).toString('hex')+'\nNOTIFICATION_KEY='+randomBytes(32).toString('hex')+'\n');"
       - run: npm run db:migrate
-      - run: node --input-type=module -e "import pg from 'pg'; const c=new pg.Client({connectionString:process.env.MIGRATION_DATABASE_URL}); await c.connect(); await c.query(\"ALTER ROLE lockd_runtime PASSWORD 'runtime_ci_only'\"); await c.end();"
+      - run: node --input-type=module -e "import pg from 'pg'; const c=new pg.Client({connectionString:process.env.MIGRATION_DATABASE_URL}); await c.connect(); await c.query(\"ALTER ROLE lockd_runtime PASSWORD 'runtime_ci_only'\"); await c.query(\"ALTER ROLE lockd_notifier PASSWORD 'notifier_ci_only'\"); await c.end();"
       - run: npm run typecheck
       - run: npm run lint
       - run: npm test

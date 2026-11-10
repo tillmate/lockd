@@ -40,10 +40,50 @@ export function BookingAccess({ id }: { id: string }) {
     return (
       <div className="narrow">
         <h1>Your private booking.</h1>
-        {error ? <Notice error={error} /> : <p role="status">Opening your booking…</p>}
+        {error ? (
+          <>
+            <Notice error={error} />
+            <LinkRecovery id={id} />
+          </>
+        ) : (
+          <p role="status">Opening your booking…</p>
+        )}
       </div>
     );
   return <BookingView initial={data} privateLink={link} />;
+}
+function LinkRecovery({ id }: { id: string }) {
+  const [busy, setBusy] = useState(false),
+    [error, setError] = useState(''),
+    [message, setMessage] = useState('');
+  return (
+    <form
+      className="card form"
+      onSubmit={async (e) => {
+        e.preventDefault();
+        setBusy(true);
+        setError('');
+        try {
+          await api(`bookings/${id}/request-link`, {
+            email: String(new FormData(e.currentTarget).get('email') ?? ''),
+          });
+          setMessage(
+            'If that email matches this booking, a fresh private link is on its way. Earlier links keep working.',
+          );
+        } catch (err) {
+          setError((err as Error).message);
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      <h2>Lost your link?</h2>
+      <p>Enter the email address you used when you held this date and we’ll send a new link.</p>
+      <Field label="Booking email address" name="email" type="email" autoComplete="email" />
+      <Notice error={error} message={message} />
+      {!message && <Submit busy={busy}>Email me a private link</Submit>}
+    </form>
+  );
 }
 export function BookingView({
   initial,

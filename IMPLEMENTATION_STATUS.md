@@ -1,6 +1,66 @@
 # Lockd implementation status
 
-## Current milestone — manual software invoices, founding allocation and billing staff MFA
+## Takeover audit — 10 November 2026 (Claude Code, verified against source and runs)
+
+Development moved from the OpenAI Codex session to Claude Code. Nothing below is taken from the prior summary without checking it.
+
+**Repository state found.** `main` at `b6a7bff` matched `origin/main`. Uncommitted: e2e assertions that wait for rendered headings before screenshots, regenerated screenshots, and a dev-generated `next-env.d.ts` path. The assertions and screenshots were verified and committed separately (`0aad36e`); `next-env.d.ts` was restored. A local PostgreSQL from the previous session was still running on 55432 and was restarted through `npm run db:local`.
+
+**CI.** The prior report did not confirm CI for the last push. Verified with `gh run list`: all three pushes passed, including `b6a7bff` (run 42837501277, 3m11s, migrations + typecheck + lint + 57 DB tests + 2 browser journeys + build + audit).
+
+**Local re-run before any change.** `npm run typecheck` and `npm run lint` passed; `npm test` **57/57 passed**; `npm run test:e2e` **2/2 passed** (1.1 min) after installing Playwright Chromium for this Windows user (the first run failed only because the browser binary was absent).
+
+**Prior claims checked against code.**
+
+| Claimed | Verdict | Evidence |
+|---|---|---|
+| DJ registration, verification, onboarding | VERIFIED | `db/001,005`, `src/lib/auth.ts`, e2e journey. Verification/reset emails were never delivered — local file only. |
+| Public booking pages, 48h holds, +24h grace once | VERIFIED | `create_hold`, `submit_proof`, table CHECKs on `bookings`; grace boundary tests. |
+| Agreements, private evidence uploads | VERIFIED | Immutable triggers, sanitize/re-encode, RLS; tests. |
+| Explicit DJ verification before confirmation | VERIFIED | `verify_payment` requires attestation + bank reference; evidence alone never confirms. |
+| PostgreSQL, RLS, collision prevention, immutable records | VERIFIED, one gap | GiST exclusion + per-DJ locks + race tests. Gap: 001's per-schema `ALTER DEFAULT PRIVILEGES … REVOKE` is a PostgreSQL no-op, so every function created after 001 was PUBLIC-executable. Not exploitable while only the runtime had schema USAGE; fixed in `010` before adding a second role. |
+| Profile/package editing | VERIFIED | `update_profile`, revision + snapshots. |
+| Cancellation, reschedule, refunds | VERIFIED | `db/006`; two-party amendment and refund attestation tests. |
+| Manual subscription invoices, Pro, 7-day grace | VERIFIED | `db/007,008`; exact price CHECK, grace in `pro_access`. |
+| Founding DJ max 50 | VERIFIED | Seat PK 1–50, advisory lock, concurrent final-seat test. |
+| Billing staff MFA and audit | VERIFIED | `db/007,009`, RFC 6238 vectors, replay/rate tests. |
+
+**Gaps found that block real operation (prioritised).**
+
+1. **No email delivery at all** — the outbox only accumulated rows. Hold confirmation, DJ booking request and agreement-signed messages were not even queued; verify/reset rows held only token hashes so a dispatcher could not have built links. → Fixed this milestone.
+2. **Clients who lose the private link have no recovery.** → Fixed this milestone.
+3. **No Super Admin operations**: only a billing-scoped staff role exists; no listing moderation (onboarding publishes immediately), no support/case access, no view of failed notifications, staff provisioning only via a local script. → Next milestone.
+4. No public reviews workflow (handover sequence item 7; correctly deferred).
+5. Launch dependencies outside code: legal/privacy sign-off, real Lockd bank details, email provider account and domain, production hosting.
+
+## Current milestone — transactional email delivery and notifications
+
+**Implemented and tested locally. No real email provider is configured and no real email has been sent.** Delivery to a real inbox needs a Resend account, API key and verified sending domain (owner action).
+
+| Capability | Status | Implementation |
+|---|---|---|
+| Delivery queue with leases, retries, backoff, terminal failure | EXISTS | `db/010_notifications.sql` (`notifier_claim/finish`), `src/lib/notify/dispatcher.ts` |
+| Separate least-privilege worker role | EXISTS | `lockd_notifier`: four functions only; cannot read bookings or call booking functions; runtime cannot read the queue |
+| Duplicate protection | EXISTS | Dedupe keys, `SKIP LOCKED` leases, lease-holder-only finish, outbox id as provider idempotency key; competing-worker test |
+| Delivery audit history | EXISTS | Immutable `notification_attempts` (provider, message id, outcome, error) |
+| Encrypted link tokens in queued email | EXISTS | `NOTIFICATION_KEY` AES-256-GCM, attached in the same transaction, erased after final outcome |
+| Local testing without sending | EXISTS | `EMAIL_PROVIDER=local` → Test mailbox (loopback local mode only); Playwright starts the worker |
+| Real provider | EXISTS / NOT CONFIGURED | Resend HTTPS adapter (`src/lib/notify/transport.ts`); `EMAIL_ALLOWED_DOMAINS` staging guard |
+| DJ verification and password recovery | EXISTS | Links delivered; expired-before-delivery links fail instead of sending |
+| Client hold confirmation + DJ booking request | EXISTS (new) | `booking_events` trigger |
+| Agreement signed (both parties) and signing reminder | EXISTS (new) | Trigger + `enqueue_due_reminders` |
+| Deposit evidence to DJ; DJ verification reminder | EXISTS | Existing outbox row + new reminder |
+| Verified, confirmed, partial (discrepancy), rejected, late-payment | EXISTS | Amounts as of the decision |
+| Hold expiry, deposit-deadline reminder | EXISTS | |
+| Date change proposed/accepted/applied/declined/withdrawn; cancellation requested/approved/declined; refund attested/acknowledged; refund-due reminder | EXISTS | Both parties, role-specific wording |
+| Subscription invoice, receipt received, failed (rejected) and partial payment, activation, founding approval, needs-resolution, void | EXISTS | Billing events now name the exact event |
+| Renewal due (7 days), grace started, lapsed to Free | EXISTS (new) | Reminders, suppressed if renewed |
+| Client private-link recovery | EXISTS (new) | `guest_links` + `request_guest_link`; original link keeps working; no match disclosure |
+| Bounce/complaint webhooks, suppression list, SMS/WhatsApp, preferences, staff requeue UI | MISSING | Requeue/inspection lands with Super Admin |
+
+**Verification.** `npm test`: **68/68** (57 existing + 11 new: exactly-once delivery, verify-link round trip, expired/missing link failure, retry/backoff/permanent/terminal, stale lease, competing workers, role isolation in both directions, reminder idempotency and stale suppression, discrepancy/confirmation/cancellation wording and amounts, billing/renewal/grace/lapse, link recovery isolation, allowlist, HTML/subject escaping, Resend status mapping and idempotency header). Browser journey extended: the hold email reaches the client mailbox with the exact private link, the DJ receives the request, and a fresh browser recovers access through the emailed link. Typecheck and lint pass.
+
+## Previous milestone — manual software invoices, founding allocation and billing staff MFA
 
 **Implemented locally with real PostgreSQL persistence. Not production-ready or deployed.** The browser workflow is connected end to end; no payment gateway or external money movement exists. All demonstrations use visibly labeled synthetic accounts, terms, receipts and attestations.
 

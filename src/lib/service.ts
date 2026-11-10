@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import sharp from 'sharp';
 import { hash, transaction, type Context } from './db';
+import { newToken } from './auth';
+import { attachSecret, linkEmailsConfigured } from './notify/secret';
 import {
   blockInput,
   holdInput,
@@ -49,17 +51,31 @@ export async function onboard(ctx: Context, input: unknown) {
 export async function createHold(input: unknown) {
   const d = holdInput.parse(input);
   const { accessToken, ...body } = d;
-  return transaction(
-    {},
-    async (c) =>
-      (
-        await c.query('SELECT lockd.create_hold($1,$2,$3) AS id', [
-          body,
-          hash(accessToken),
-          hash(JSON.stringify(body)),
-        ])
-      ).rows[0].id as string,
-  );
+  return transaction({}, async (c) => {
+    const id = (
+      await c.query('SELECT lockd.create_hold($1,$2,$3) AS id', [
+        body,
+        hash(accessToken),
+        hash(JSON.stringify(body)),
+      ])
+    ).rows[0].id as string;
+    // The hold email includes the private link only when link encryption is configured;
+    // the browser always receives it directly. Retries are no-ops once attached.
+    if (linkEmailsConfigured()) await attachSecret(c, `hold:${id}:client`, accessToken);
+    return id;
+  });
+}
+// Emails an additional private link to the booking's client address. The response never
+// reveals whether the booking or address matched; existing links keep working.
+export async function requestGuestLink(bid: string, input: unknown) {
+  z.uuid().parse(bid);
+  const { email } = z.object({ email: z.email().max(254) }).parse(input);
+  if (!linkEmailsConfigured()) throw new Error('Link recovery email is not configured');
+  const token = newToken();
+  await transaction({}, async (c) => {
+    await c.query('SELECT lockd.request_guest_link($1,$2,$3)', [bid, email, hash(token)]);
+    await attachSecret(c, `link:${hash(token)}`, token);
+  });
 }
 export async function expire() {
   return transaction(

@@ -54,23 +54,29 @@ export function verifyTotp(secret: string, code: string, seconds = Date.now() / 
   }
   return null;
 }
-function key() {
-  const value = process.env.STAFF_MFA_KEY;
-  if (!value || !/^[a-f0-9]{64}$/i.test(value))
-    throw new Error('Staff MFA encryption is not configured');
-  return Buffer.from(value, 'hex');
+// Separate 256-bit keys per purpose: staff authenticator secrets and queued email link tokens.
+export type KeyName = 'STAFF_MFA_KEY' | 'NOTIFICATION_KEY';
+export const keyConfigured = (name: KeyName) => /^[a-f0-9]{64}$/i.test(process.env[name] ?? '');
+function key(name: KeyName) {
+  if (!keyConfigured(name))
+    throw new Error(
+      name === 'STAFF_MFA_KEY'
+        ? 'Staff MFA encryption is not configured'
+        : 'Notification encryption is not configured',
+    );
+  return Buffer.from(process.env[name]!, 'hex');
 }
-export function encryptSecret(secret: string) {
+export function encryptSecret(secret: string, name: KeyName = 'STAFF_MFA_KEY') {
   const iv = randomBytes(12),
-    cipher = createCipheriv('aes-256-gcm', key(), iv);
+    cipher = createCipheriv('aes-256-gcm', key(name), iv);
   const encrypted = Buffer.concat([cipher.update(secret, 'utf8'), cipher.final()]);
   return [iv, cipher.getAuthTag(), encrypted].map((b) => b.toString('base64url')).join('.');
 }
-export function decryptSecret(value: string) {
+export function decryptSecret(value: string, name: KeyName = 'STAFF_MFA_KEY') {
   const parts = value.split('.');
-  if (parts.length !== 3) throw new Error('Invalid encrypted authenticator secret');
+  if (parts.length !== 3) throw new Error('Invalid encrypted secret');
   const [iv, tag, encrypted] = parts.map((s) => Buffer.from(s, 'base64url'));
-  const cipher = createDecipheriv('aes-256-gcm', key(), iv);
+  const cipher = createDecipheriv('aes-256-gcm', key(name), iv);
   cipher.setAuthTag(tag);
   return Buffer.concat([cipher.update(encrypted), cipher.final()]).toString('utf8');
 }

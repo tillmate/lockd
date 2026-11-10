@@ -6,6 +6,18 @@ import { provisionLocalBilling } from '../../scripts/local-billing';
 import { totp } from '../../src/lib/mfa';
 
 const password = 'Synthetic-test-password-42!';
+// The notification worker renders queued email into the local test mailbox asynchronously.
+async function mail(page: Page, to: string, subject: string | RegExp) {
+  const letter = page
+    .getByRole('article', { name: subject, exact: typeof subject === 'string' })
+    .filter({ has: page.getByRole('heading', { name: to, exact: true }) })
+    .first();
+  await expect(async () => {
+    await page.goto('/dev/mailbox');
+    await expect(letter).toBeVisible({ timeout: 1000 });
+  }).toPass({ timeout: 30000 });
+  return letter;
+}
 async function setupDJ(page: Page, label: string) {
   const suffix = randomUUID().slice(0, 8),
     email = `${label}-${suffix}@example.test`,
@@ -15,11 +27,10 @@ async function setupDJ(page: Page, label: string) {
   await page.getByLabel('Create password', { exact: true }).fill(password);
   await page.getByRole('button', { name: 'Create my account' }).click();
   await expect(page.getByRole('status')).toContainText('Account request received');
-  await page.goto('/dev/mailbox');
-  await page
-    .getByRole('article')
-    .filter({ has: page.getByRole('heading', { name: email, exact: true }) })
-    .getByRole('link', { name: 'Open verify link' })
+  await (
+    await mail(page, email, 'Verify your Lockd email address')
+  )
+    .getByRole('link', { name: 'Verify email address' })
     .click();
   await page.getByRole('button', { name: 'Verify my email' }).click();
   await expect(page.getByRole('status')).toContainText('Email verified');
@@ -90,12 +101,35 @@ test('complete browser journey with two isolated DJs and an account-free client'
   const date = new Date(Date.now() + 45 * 86400000).toISOString().slice(0, 10);
   await cp.getByLabel('Event start (Jamaica time)').fill(`${date}T20:00`);
   await cp.getByLabel('Your full name').fill('Synthetic Client');
-  await cp.getByLabel('Your email').fill('synthetic-client@example.test');
+  const clientEmail = `synthetic-client-${randomUUID().slice(0, 8)}@example.test`;
+  await cp.getByLabel('Your email').fill(clientEmail);
   await cp.getByLabel('Event venue / address').fill('TEST venue, Kingston');
   await cp.getByRole('button', { name: 'Hold my date' }).click();
   await expect(cp.getByRole('heading', { name: 'Your event is taking shape.' })).toBeVisible();
   await expect(cp.getByRole('button', { name: 'Copy private booking link' })).toBeVisible();
   const id = cp.url().split('/booking/')[1].split('#')[0];
+  // Hold confirmation reaches the client with their private link; the DJ gets the request.
+  const inbox = await other.newPage();
+  const holdMail = (
+    await mail(inbox, clientEmail, `Your date with ${a.stageName} is on hold`)
+  ).getByRole('link', { name: 'Open your private booking' });
+  expect(await holdMail.getAttribute('href')).toMatch(new RegExp(`/booking/${id}#[a-f0-9]{64}$`));
+  await mail(inbox, a.email, /^New booking request: Synthetic Client, /);
+  // A browser without the link can request a fresh one by email; it opens the same booking.
+  const lost = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const lp = await lost.newPage();
+  await lp.goto(`/booking/${id}`);
+  await lp.getByLabel('Booking email address').fill(clientEmail);
+  await lp.getByRole('button', { name: 'Email me a private link' }).click();
+  await expect(lp.getByRole('status')).toContainText('fresh private link is on its way');
+  await (
+    await mail(lp, clientEmail, 'Your private Lockd booking link')
+  )
+    .getByRole('link', { name: 'Open your private booking' })
+    .click();
+  await expect(lp.getByRole('heading', { name: 'Your event is taking shape.' })).toBeVisible();
+  await lost.close();
+  await inbox.close();
   await cp.getByLabel('Full name as your signature').fill('Synthetic Client');
   await cp.getByLabel('I have read and accept this exact agreement').check();
   await cp.getByRole('button', { name: 'Sign agreement' }).click();

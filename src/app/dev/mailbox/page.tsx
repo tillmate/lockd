@@ -1,35 +1,39 @@
-import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { readdir } from 'node:fs/promises';
-import { localMode, readLocalToken } from '@/lib/auth';
+import { localMode } from '@/lib/auth';
+import { localMailbox } from '@/lib/notify/transport';
+export const dynamic = 'force-dynamic';
 export default async function Page() {
   if (!localMode()) notFound();
-  const files = await readdir('.local/mailbox').catch(() => []);
-  const letters = await Promise.all(
-    files.filter((f) => /^[a-f0-9]{64}\.json$/.test(f)).map((f) => readLocalToken(f.slice(0, -5))),
-  );
+  const letters = await localMailbox();
   return (
     <div className="shell">
       <p className="eyebrow">LOCAL DEVELOPMENT ONLY</p>
       <h1>Test mailbox</h1>
-      <p>No emails are sent. These links are for synthetic local accounts only.</p>
+      <p>
+        No emails are sent. The notification worker (<code>npm run worker</code>) renders queued
+        messages here for synthetic local accounts only.
+      </p>
       {letters.length ? (
-        letters
-          .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-          .map((l) => (
-            <article className="card" key={l.token}>
-              <h3>{l.recipient}</h3>
-              <p>{l.kind === 'verify' ? 'Verify email' : 'Reset password'}</p>
-              <Link
-                className="button"
-                href={`/${l.kind === 'verify' ? 'verify' : 'reset'}#${l.token}`}
-              >
-                Open {l.kind} link
-              </Link>
-            </article>
-          ))
+        letters.map((l) => (
+          <article className="card" key={l.id} aria-label={l.subject}>
+            <h3>{l.to}</h3>
+            <p>
+              <strong>{l.subject}</strong>
+            </p>
+            <details>
+              <summary>Read message</summary>
+              <pre style={{ whiteSpace: 'pre-wrap' }}>{l.text}</pre>
+            </details>
+            {l.action && (
+              // Plain anchor: link fragments carry one-time tokens and must load as written.
+              <a className="button" href={l.action.url}>
+                {l.action.label}
+              </a>
+            )}
+          </article>
+        ))
       ) : (
-        <div className="empty">No local messages yet.</div>
+        <div className="empty">No local messages yet. Is the worker running?</div>
       )}
     </div>
   );

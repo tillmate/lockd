@@ -4,14 +4,33 @@ import { randomUUID, randomBytes } from 'node:crypto';
 import sharp from 'sharp';
 import { migrate } from '../scripts/migrate';
 import { transaction, hash, closeDatabase } from '../src/lib/db';
-import { newToken, passwordHash, login, verifyEmail, resetPassword } from '../src/lib/auth';
+import {
+  newToken,
+  passwordHash,
+  login,
+  verifyEmail,
+  resetPassword,
+  register,
+  requestReset,
+} from '../src/lib/auth';
 import * as s from '../src/lib/service';
 import * as billing from '../src/lib/billing';
 import { base32, encryptSecret, totp, verifyTotp } from '../src/lib/mfa';
 import { moneyToMinor } from '../src/lib/validation';
-let admin: pg.Client, control: pg.Client;
+import { dispatch } from '../src/lib/notify/dispatcher';
+import { attachSecret } from '../src/lib/notify/secret';
+import { render, toEmail } from '../src/lib/notify/templates';
+import {
+  deliveryConfig,
+  resendTransport,
+  type Outgoing,
+  type SendResult,
+  type Transport,
+} from '../src/lib/notify/transport';
+let admin: pg.Client, control: pg.Client, notifier: pg.Pool;
 let testName: string;
 let runtimeBase: string;
+let notifierUrl: string;
 beforeAll(async () => {
   try {
     process.loadEnvFile('.env.local');
@@ -38,9 +57,17 @@ beforeAll(async () => {
   process.env.DATABASE_URL = runtime.toString();
   process.env.LOCKD_LOCAL_ONLY = '0';
   process.env.STAFF_MFA_KEY ??= randomBytes(32).toString('hex');
+  process.env.NOTIFICATION_KEY ??= randomBytes(32).toString('hex');
+  if (!process.env.NOTIFIER_DATABASE_URL)
+    throw new Error('NOTIFIER_DATABASE_URL is required; run npm run db:local');
+  const delivery = new URL(process.env.NOTIFIER_DATABASE_URL);
+  delivery.pathname = `/${testName}`;
+  notifierUrl = delivery.toString();
+  notifier = new pg.Pool({ connectionString: notifierUrl, max: 3 });
 });
 afterAll(async () => {
   await closeDatabase();
+  await notifier?.end();
   await admin?.end();
   if (control) {
     await control.query(`DROP DATABASE ${testName} WITH (FORCE)`);
@@ -1420,5 +1447,468 @@ describe('Manual software subscriptions and scoped staff MFA', () => {
         },
       ),
     ).rejects.toThrow(/cohort is full/);
+  });
+});
+
+const ORIGIN = 'https://lockd.test';
+function recorder(outcome?: (m: Outgoing) => SendResult) {
+  const sent: Outgoing[] = [];
+  const transport: Transport = {
+    name: 'recorder',
+    async send(m) {
+      sent.push(m);
+      return outcome ? outcome(m) : { ok: true, messageId: `rec-${m.id}` };
+    },
+  };
+  return { sent, transport };
+}
+async function drain(
+  transport: Transport,
+  pool = notifier,
+  allowedDomains: string[] | null = null,
+) {
+  for (let i = 0; i < 50; i++) {
+    const r = await dispatch(pool, { transport, allowedDomains }, ORIGIN);
+    if (!(r.sent + r.retry + r.failed + r.skipped)) return;
+  }
+}
+type Row = {
+  id: string;
+  kind: string;
+  audience: string;
+  status: string;
+  attempts: number;
+  secret_cipher: string | null;
+  last_error: string | null;
+};
+const rows = async (bookingId: string) =>
+  (
+    await admin.query(
+      "SELECT id,kind,audience,status,attempts,secret_cipher,last_error FROM lockd.outbox WHERE payload->>'bookingId'=$1 ORDER BY created_at,kind",
+      [bookingId],
+    )
+  ).rows as Row[];
+const tokenIn = (m: Outgoing) => m.action!.url.split('#')[1];
+
+describe('Transactional notifications', () => {
+  it('queues hold, request and signature messages once and delivers each exactly once', async () => {
+    const f = await fixture(),
+      h = await signed(f);
+    await s.createHold(h.input); // An idempotent retry must not queue or re-attach anything.
+    const queued = await rows(h.id);
+    expect(queued.map((r) => `${r.kind}:${r.audience}`).sort()).toEqual([
+      'agreement_signed:client',
+      'agreement_signed:dj',
+      'booking_request:dj',
+      'hold_created:client',
+    ]);
+    const hold = queued.find((r) => r.kind === 'hold_created')!;
+    expect(hold.secret_cipher).toBeTruthy();
+    expect(hold.secret_cipher).not.toContain(h.guest);
+    const { sent, transport } = recorder();
+    await drain(transport);
+    await drain(transport);
+    for (const r of await rows(h.id)) {
+      expect(r.status).toBe('sent');
+      expect(r.secret_cipher).toBeNull();
+      expect(sent.filter((m) => m.id === r.id)).toHaveLength(1);
+    }
+    const holdMail = sent.find((m) => m.id === hold.id)!;
+    expect(holdMail.to).toBe('client@example.test');
+    expect(holdMail.action!.url).toBe(`${ORIGIN}/booking/${h.id}#${h.guest}`);
+    expect(holdMail.text).toMatch(/Lockd never holds booking deposits/);
+    const request = sent.find((m) => m.kind === 'booking_request' && m.action!.url.includes(h.id))!;
+    expect(request.to).toBe(f.email);
+    expect(request.action!.url).toBe(`${ORIGIN}/dashboard/bookings/${h.id}`);
+    expect(request.text).not.toContain(h.guest);
+    const attempts = await admin.query(
+      'SELECT outcome,provider FROM lockd.notification_attempts WHERE outbox_id=$1',
+      [hold.id],
+    );
+    expect(attempts.rows).toEqual([{ outcome: 'sent', provider: 'recorder' }]);
+    await expect(
+      admin.query("UPDATE lockd.notification_attempts SET outcome='failed' WHERE outbox_id=$1", [
+        hold.id,
+      ]),
+    ).rejects.toThrow(/Immutable/);
+  });
+  it('delivers working verification links and fails links that cannot work', async () => {
+    const email = `mail-${randomUUID()}@example.test`;
+    await register({ email, password: 'Testing-password-123!' });
+    const row = (
+      await admin.query(
+        "SELECT id,secret_cipher FROM lockd.outbox WHERE recipient=$1 AND kind='verify'",
+        [email],
+      )
+    ).rows[0];
+    expect(row.secret_cipher).toMatch(/^[\w-]+\.[\w-]+\.[\w-]+$/);
+    // Queued without an encrypted link (written directly in SQL, as fixtures do).
+    const bare = `bare-${randomUUID()}@example.test`;
+    await transaction({}, async (c) => {
+      await c.query('SELECT lockd.register_user($1,$2,$3)', [bare, 'x', hash(newToken())]);
+    });
+    const { sent, transport } = recorder();
+    await drain(transport);
+    const mail = sent.find((m) => m.id === row.id)!;
+    expect(mail.action!.url.startsWith(`${ORIGIN}/verify#`)).toBe(true);
+    expect(await verifyEmail(tokenIn(mail))).toBe(true);
+    const unusable = (
+      await admin.query('SELECT status,last_error FROM lockd.outbox WHERE recipient=$1', [bare])
+    ).rows[0];
+    expect(unusable.status).toBe('failed');
+    expect(unusable.last_error).toMatch(/secret unavailable/);
+    expect(sent.some((m) => m.to === bare)).toBe(false);
+    await requestReset(email);
+    await requestReset(`nobody-${randomUUID()}@example.test`);
+    await admin.query(
+      "UPDATE lockd.outbox SET created_at=now()-interval '31 minutes' WHERE recipient=$1 AND kind='reset'",
+      [email],
+    );
+    await drain(transport);
+    const reset = (
+      await admin.query(
+        "SELECT status,last_error,secret_cipher FROM lockd.outbox WHERE recipient=$1 AND kind='reset'",
+        [email],
+      )
+    ).rows[0];
+    expect(reset).toMatchObject({ status: 'failed', secret_cipher: null });
+    expect(reset.last_error).toMatch(/expired/);
+  });
+  it('retries transient failures with backoff, fails permanent errors and ignores stale leases', async () => {
+    const f = await fixture();
+    await drain(recorder().transport);
+    const h = await held(f);
+    const flaky = recorder(() => ({ ok: false, retry: true, error: 'Resend 503: unavailable' }));
+    await drain(flaky.transport);
+    const queued = await rows(h.id);
+    expect(queued).toHaveLength(2);
+    for (const r of queued)
+      expect(r).toMatchObject({
+        status: 'pending',
+        attempts: 1,
+        last_error: 'Resend 503: unavailable',
+      });
+    const due = await admin.query(
+      "SELECT bool_and(next_attempt_at BETWEEN now()+interval '50 seconds' AND now()+interval '70 seconds') ok FROM lockd.outbox WHERE payload->>'bookingId'=$1",
+      [h.id],
+    );
+    expect(due.rows[0].ok).toBe(true);
+    const hold = queued.find((r) => r.kind === 'hold_created')!,
+      request = queued.find((r) => r.kind === 'booking_request')!;
+    const stale = await notifier.query(
+      "SELECT lockd.notifier_finish($1,1,'sent','stale',NULL,NULL,60) AS s",
+      [hold.id],
+    );
+    expect(stale.rows[0].s).toBe('stale');
+    await admin.query(
+      "UPDATE lockd.outbox SET next_attempt_at=now() WHERE payload->>'bookingId'=$1",
+      [h.id],
+    );
+    const mixed = recorder((m) =>
+      m.id === hold.id
+        ? { ok: true, messageId: 'provider-1' }
+        : { ok: false, retry: false, error: 'Resend 422: invalid to' },
+    );
+    await drain(mixed.transport);
+    const after = await rows(h.id);
+    expect(after.find((r) => r.id === hold.id)).toMatchObject({
+      status: 'sent',
+      attempts: 2,
+      secret_cipher: null,
+    });
+    expect(after.find((r) => r.id === request.id)).toMatchObject({ status: 'failed', attempts: 2 });
+    const history = await admin.query(
+      'SELECT attempt,outcome FROM lockd.notification_attempts WHERE outbox_id=$1 ORDER BY attempt',
+      [hold.id],
+    );
+    expect(history.rows).toEqual([
+      { attempt: 1, outcome: 'retry' },
+      { attempt: 2, outcome: 'sent' },
+    ]);
+    // The eighth attempt is terminal even for a retryable error.
+    await admin.query(
+      "UPDATE lockd.outbox SET status='pending',attempts=7,next_attempt_at=now() WHERE id=$1",
+      [request.id],
+    );
+    await drain(flaky.transport);
+    expect((await rows(h.id)).find((r) => r.id === request.id)).toMatchObject({
+      status: 'failed',
+      attempts: 8,
+    });
+  });
+  it('never delivers a message twice with competing workers', async () => {
+    const djs = [await fixture(), await fixture()];
+    await drain(recorder().transport);
+    for (const f of djs) for (let i = 0; i < 3; i++) await held(f, 30 + i * 3);
+    const second = new pg.Pool({ connectionString: notifierUrl, max: 2 });
+    const a = recorder(),
+      b = recorder();
+    await Promise.all([
+      drain(a.transport),
+      drain(b.transport, second),
+      drain(a.transport),
+      drain(b.transport, second),
+    ]);
+    await second.end();
+    const ids = [...a.sent, ...b.sent].map((m) => m.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids.length).toBe(12);
+  });
+  it('isolates the notifier role from bookings and the runtime from the delivery queue', async () => {
+    const f = await fixture(),
+      h = await held(f);
+    for (const sql of [
+      'SELECT * FROM lockd.bookings LIMIT 1',
+      'SELECT * FROM lockd.outbox LIMIT 1',
+      'SELECT lockd.expire_all()',
+      "SELECT lockd.public_profiles('x')",
+    ])
+      await expect(notifier.query(sql)).rejects.toMatchObject({ code: '42501' });
+    await expect(
+      notifier.query('SELECT lockd.create_hold($1,$2,$3)', [h.input, 'a'.repeat(64), 'b']),
+    ).rejects.toMatchObject({ code: '42501' });
+    await expect(
+      notifier.query('SELECT lockd.request_guest_link($1,$2,$3)', [
+        h.id,
+        'x@example.test',
+        'a'.repeat(64),
+      ]),
+    ).rejects.toMatchObject({ code: '42501' });
+    for (const sql of [
+      'SELECT * FROM lockd.outbox LIMIT 1',
+      'SELECT * FROM lockd.notification_attempts LIMIT 1',
+      'SELECT * FROM lockd.guest_links LIMIT 1',
+      'SELECT * FROM lockd.notifier_claim(1,60)',
+      'SELECT lockd.enqueue_due_reminders()',
+    ])
+      await expect(transaction({}, (c) => c.query(sql))).rejects.toMatchObject({ code: '42501' });
+    // Attaching requires the hash of the real link, and only fills an empty slot once.
+    expect(await transaction({}, (c) => attachSecret(c, `hold:${h.id}:client`, newToken()))).toBe(
+      false,
+    );
+    expect(await transaction({}, (c) => attachSecret(c, `hold:${h.id}:client`, h.guest))).toBe(
+      false,
+    );
+    // Context is only readable for a row currently leased for delivery.
+    const id = (await rows(h.id))[0].id;
+    expect((await notifier.query('SELECT lockd.notifier_context($1) AS c', [id])).rows[0].c).toBe(
+      null,
+    );
+  });
+  it('queues idempotent reminders and suppresses those made stale by later actions', async () => {
+    const f = await fixture(),
+      unsigned = await held(f, 26),
+      unpaid = await signed(f, 34),
+      review = await claimed(f);
+    await expiry(unsigned.id, 35 * 3600);
+    await expiry(unpaid.id, 6 * 3600);
+    await expiry(review.id, -19 * 3600, true); // within the 24-hour verification window
+    await drain(recorder().transport);
+    await notifier.query('SELECT lockd.enqueue_due_reminders()');
+    await notifier.query('SELECT lockd.enqueue_due_reminders()');
+    const reminders = async (id: string) => (await rows(id)).filter((r) => /reminder/.test(r.kind));
+    expect((await reminders(unsigned.id)).map((r) => r.kind)).toEqual(['agreement_reminder']);
+    expect((await reminders(unpaid.id)).map((r) => r.kind)).toEqual(['deposit_reminder']);
+    expect((await reminders(review.id)).map((r) => `${r.kind}:${r.audience}`)).toEqual([
+      'verification_reminder:dj',
+    ]);
+    const b = (await s.booking(unsigned.ctx, unsigned.id))!;
+    await s.sign(unsigned.ctx, unsigned.id, {
+      agreementId: b.agreement.id,
+      contentHash: b.agreement.content_hash,
+      signer: 'Synthetic Client',
+      accept: true,
+    });
+    const { sent, transport } = recorder();
+    await drain(transport);
+    expect((await reminders(unsigned.id))[0]).toMatchObject({ status: 'suppressed' });
+    const depositId = (await reminders(unpaid.id))[0].id;
+    const deposit = sent.find((m) => m.id === depositId)!;
+    expect(deposit.subject).toMatch(/ends soon/);
+    expect(deposit.text).toMatch(/J\$27,500\.00/);
+    expect(sent.find((m) => m.kind === 'verification_reminder')!.to).toBe(f.email);
+  });
+  it('reports payment discrepancies, confirmation and cancellation to the right parties', async () => {
+    const f = await fixture(),
+      h = await claimed(f);
+    await s.verify({ session: f.session }, h.id, decision(h.claim, 1000000));
+    const topUp = await s.proof(h.ctx, h.id, 'TEST-TOPUP', 1750000, await png());
+    await s.verify({ session: f.session }, h.id, decision(topUp, 1750000));
+    const rid = await s.requestCancellation(h.ctx, h.id, {
+      reason: 'Synthetic client cancellation',
+    });
+    await s.decideCancellation({ session: f.session }, h.id, cancelDecision(rid));
+    const { sent, transport } = recorder();
+    await drain(transport);
+    const mine = new Set((await rows(h.id)).map((r) => r.id));
+    const mail = sent.filter((m) => mine.has(m.id));
+    const by = (kind: string, to: string) => mail.filter((m) => m.kind === kind && m.to === to);
+    expect(by('proof_submitted', f.email)).toHaveLength(2);
+    const partial = by('partial_verified', 'client@example.test')[0];
+    expect(partial.subject).toMatch(/Part of your deposit/);
+    expect(partial.text).toMatch(/verified J\$10,000\.00 .*you reported J\$27,500\.00/);
+    expect(partial.text).toMatch(/remaining J\$17,500\.00/);
+    expect(by('confirmed_lockd', 'client@example.test')[0].subject).toMatch(/^Confirmed:/);
+    expect(by('CANCELLATION_REQUESTED', f.email)[0].text).toMatch(/asked to cancel/);
+    expect(by('CANCELLED', 'client@example.test')[0].text).toMatch(
+      /owes you a direct refund of J\$13,750\.00/,
+    );
+    expect(by('CANCELLED', f.email)[0].text).toMatch(/You owe the client/);
+    // Only the original hold email carries the private link.
+    expect(mail.filter((m) => m.text.includes(h.guest)).map((m) => m.kind)).toEqual([
+      'hold_created',
+    ]);
+  });
+  it('sends invoice, failed payment, activation, renewal, grace and lapse notices once each', async () => {
+    const x = await invoiceFixture('monthly');
+    await billing.reconcile(x.staff.ctx, x.id, {
+      claimId: x.claim,
+      decision: 'rejected',
+      amountMinor: 0,
+      bankReference: '',
+      receivedAt: null,
+      reason: 'Synthetic reference not found',
+      attest: false,
+    });
+    const retry = await billing.upload(x.ctx, x.id, 'SYNTHETIC-RETRY', 350000, await png());
+    await billing.reconcile(x.staff.ctx, x.id, invoiceDecision(retry));
+    const { sent, transport } = recorder();
+    await drain(transport);
+    const mine = sent.filter((m) => m.to === x.dj.email);
+    expect(
+      mine.some((m) => /^Lockd invoice #\d+ \(Pro monthly, J\$3,500\.00\)$/.test(m.subject)),
+    ).toBe(true);
+    expect(mine.find((m) => m.kind === 'SUBSCRIPTION_RECONCILED')!.text).toMatch(
+      /Synthetic reference not found/,
+    );
+    expect(mine.find((m) => m.kind === 'SUBSCRIPTION_ACTIVATED')!.subject).toBe(
+      'Pro monthly is active',
+    );
+    const stages: [number, string][] = [
+      [3, 'renewal_due'],
+      [-2, 'renewal_overdue'],
+      [-8, 'pro_lapsed'],
+    ];
+    for (const [days, kind] of stages) {
+      await moveSubscriptionEnd(x.dj.account, days);
+      await notifier.query('SELECT lockd.enqueue_due_reminders()');
+      await notifier.query('SELECT lockd.enqueue_due_reminders()');
+      await drain(transport);
+      expect(sent.filter((m) => m.to === x.dj.email && m.kind === kind)).toHaveLength(1);
+    }
+    expect(sent.find((m) => m.to === x.dj.email && m.kind === 'renewal_overdue')!.text).toMatch(
+      /moves to Free/,
+    );
+  });
+  it('recovers client access with an additional emailed link without revealing matches', async () => {
+    const f = await fixture(),
+      h = await held(f);
+    await drain(recorder().transport);
+    await s.requestGuestLink(h.id, { email: 'someone-else@example.test' });
+    expect((await rows(h.id)).filter((r) => r.kind === 'booking_link')).toHaveLength(0);
+    await s.requestGuestLink(h.id, { email: 'CLIENT@example.test' });
+    const { sent, transport } = recorder();
+    await drain(transport);
+    const link = sent.find((m) => m.kind === 'booking_link' && m.action!.url.includes(h.id))!;
+    const fresh = tokenIn(link);
+    expect(fresh).not.toBe(h.guest);
+    expect((await s.booking({ guest: fresh }, h.id))?.id).toBe(h.id);
+    expect((await s.booking(h.ctx, h.id))?.id).toBe(h.id);
+    const other = await held(await fixture());
+    expect(await s.booking({ guest: fresh }, other.id)).toBeNull();
+    expect(
+      (await s.booking(h.ctx, h.id))!.events.some((e) => e.kind === 'CLIENT_LINK_REISSUED'),
+    ).toBe(true);
+  });
+  it('honors the staging recipient allowlist and escapes user-entered names', async () => {
+    const f = await fixture();
+    await drain(recorder().transport);
+    const h = await held(f);
+    const { sent, transport } = recorder();
+    await drain(transport, notifier, ['usetillmate.com']);
+    expect(sent).toHaveLength(0);
+    expect((await rows(h.id)).every((r) => r.status === 'suppressed')).toBe(true);
+    const now = new Date().toISOString();
+    const r = render(
+      {
+        id: randomUUID(),
+        kind: 'booking_request',
+        audience: 'dj',
+        recipient: 'x@example.test',
+        payload: {},
+        created_at: now,
+      },
+      {
+        booking: {
+          id: h.id,
+          status: 'AWAITING_SIGNATURE',
+          clientName: '<script>alert(1)</script>\r\nBcc: x',
+          venue: 'V',
+          startsAt: now,
+          endsAt: now,
+          priceMinor: 100,
+          depositMinor: 100,
+          verifiedMinor: 0,
+          expiresAt: now,
+          graceUsed: false,
+          djName: 'DJ',
+          djSlug: 'dj',
+          packageName: 'P',
+        },
+      },
+      ORIGIN,
+    );
+    if (!r.ok) throw new Error(r.reason);
+    const email = toEmail(r.message);
+    expect(email.html).not.toContain('<script>');
+    expect(email.html).toContain('&lt;script&gt;');
+    expect(email.subject).not.toMatch(/[\r\n]/);
+  });
+  it('maps Resend responses to retryable and permanent outcomes with an idempotency key', async () => {
+    const calls: RequestInit[] = [];
+    const reply = (status: number, body: unknown) =>
+      (async (_: unknown, init?: RequestInit) => {
+        calls.push(init!);
+        return new Response(JSON.stringify(body), { status });
+      }) as unknown as typeof fetch;
+    const msg = {
+      id: randomUUID(),
+      kind: 'DATE_CHANGE_PROPOSED',
+      to: 'a@example.test',
+      subject: 'S',
+      text: 'T',
+      html: '<p>T</p>',
+    };
+    const t = (f: typeof fetch) =>
+      resendTransport('re_test_key', 'Lockd <bookings@lockd.test>', undefined, f);
+    expect(await t(reply(200, { id: 'em_1' })).send(msg)).toEqual({
+      ok: true,
+      messageId: 'em_1',
+    });
+    expect((calls[0].headers as Record<string, string>)['Idempotency-Key']).toBe(`lockd-${msg.id}`);
+    expect(JSON.parse(String(calls[0].body))).toMatchObject({
+      to: ['a@example.test'],
+      tags: [{ name: 'kind', value: 'DATE_CHANGE_PROPOSED' }],
+    });
+    expect(await t(reply(422, { message: 'Invalid `to`' })).send(msg)).toMatchObject({
+      ok: false,
+      retry: false,
+    });
+    for (const status of [401, 429, 500, 503])
+      expect(await t(reply(status, {})).send(msg)).toMatchObject({ ok: false, retry: true });
+    const offline = (async () => {
+      throw new Error('ECONNRESET');
+    }) as unknown as typeof fetch;
+    expect(await t(offline).send(msg)).toMatchObject({ ok: false, retry: true });
+    expect(() =>
+      deliveryConfig({
+        EMAIL_PROVIDER: 'resend',
+        RESEND_API_KEY: 'k',
+        EMAIL_FROM: 'a@b.c',
+        APP_ORIGIN: 'http://127.0.0.1:3100',
+      }),
+    ).toThrow(/https/);
+    expect(() => deliveryConfig({ EMAIL_PROVIDER: 'local' })).toThrow(/local mode/);
+    expect(deliveryConfig({}).transport).toBeNull();
   });
 });

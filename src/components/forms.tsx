@@ -1,7 +1,14 @@
 'use client';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type FormEvent,
+  type ReactNode,
+} from 'react';
 import { moneyToMinor, parishNames } from '@/lib/validation';
 import { money } from '@/lib/format';
 import type { Profile, Settings } from '@/lib/service';
@@ -62,14 +69,23 @@ export function Notice({ error, message }: { error?: string; message?: string })
     </>
   );
 }
-export function Submit({ busy, children }: { busy: boolean; children: ReactNode }) {
+export function Submit({
+  busy,
+  disabled = false,
+  children,
+}: {
+  busy: boolean;
+  disabled?: boolean;
+  children: ReactNode;
+}) {
   return (
-    <button className="button" disabled={busy} type="submit">
+    <button className="button" disabled={busy || disabled} type="submit">
       {busy ? 'Saving…' : children}
     </button>
   );
 }
 const val = (d: FormData, key: string) => String(d.get(key) ?? '');
+const noSubscribe = () => () => {};
 export const jamaicaISO = (s: string) => {
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(s))
     throw new Error('Choose a valid date and time');
@@ -140,6 +156,13 @@ export function TokenForm({ mode }: { mode: 'verify' | 'reset' }) {
   const [error, setError] = useState(''),
     [busy, setBusy] = useState(false),
     [message, setMessage] = useState('');
+  // Links open as full page loads from email; keep the button disabled until hydration so a
+  // fast click cannot trigger a native submit before the token is read.
+  const ready = useSyncExternalStore(
+    noSubscribe,
+    () => true,
+    () => false,
+  );
   useEffect(() => {
     if (location.hash) token.current = location.hash.slice(1);
     history.replaceState(null, '', location.pathname);
@@ -181,7 +204,9 @@ export function TokenForm({ mode }: { mode: 'verify' | 'reset' }) {
       )}
       <Notice error={error} message={message} />
       {!message ? (
-        <Submit busy={busy}>{mode === 'verify' ? 'Verify my email' : 'Change password'}</Submit>
+        <Submit busy={busy} disabled={!ready}>
+          {mode === 'verify' ? 'Verify my email' : 'Change password'}
+        </Submit>
       ) : (
         <Link className="button" href="/login">
           Continue to sign in →

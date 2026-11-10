@@ -2,7 +2,7 @@ import { randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:cry
 import { promisify } from 'node:util';
 import { hash, transaction, type Context } from './db';
 import { credentials } from './validation';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { attachSecret } from './notify/secret';
 const scrypt = promisify(scryptCallback);
 export const newToken = () => randomBytes(32).toString('hex');
 export async function passwordHash(password: string) {
@@ -21,27 +21,18 @@ export function localMode() {
     ['http://127.0.0.1:3100', 'http://localhost:3100'].includes(process.env.APP_ORIGIN ?? '')
   );
 }
-// Local-only delivery adapter. Tokens never returned in registration/reset API responses.
-export async function deliverLocal(recipient: string, kind: string, token: string) {
-  if (!localMode()) return;
-  await mkdir('.local/mailbox', { recursive: true });
-  await writeFile(
-    `.local/mailbox/${hash(token)}.json`,
-    JSON.stringify({ recipient, kind, token, createdAt: new Date().toISOString() }),
-    { mode: 0o600 },
-  );
-}
+// Tokens are never returned in API responses. The queued email carries an encrypted copy
+// committed atomically with the token; the notification worker delivers it.
 export async function register(input: unknown) {
   const d = credentials.parse(input);
   const token = newToken();
   const p = await passwordHash(d.password);
-  const id = await transaction(
-    {},
-    async (c) =>
-      (await c.query('SELECT lockd.register_user($1,$2,$3) AS id', [d.email, p, hash(token)]))
-        .rows[0].id as string | null,
-  );
-  if (id) await deliverLocal(d.email, 'verify', token);
+  await transaction({}, async (c) => {
+    const id = (
+      await c.query('SELECT lockd.register_user($1,$2,$3) AS id', [d.email, p, hash(token)])
+    ).rows[0].id as string | null;
+    if (id) await attachSecret(c, `verify:${hash(token)}`, token);
+  });
 }
 export async function verifyEmail(token: string) {
   return transaction(
@@ -71,15 +62,11 @@ export async function login(input: unknown) {
 }
 export async function requestReset(email: string) {
   const token = newToken();
+  // Same work whether or not the account exists; attachment is a no-op without a queued row.
   await transaction({}, async (c) => {
     await c.query('SELECT lockd.request_reset($1,$2)', [email, hash(token)]);
+    await attachSecret(c, `reset:${hash(token)}`, token);
   });
-  // Only deliver if there is an actual token; the local adapter is not enabled remotely.
-  const exists = await transaction(
-    {},
-    async (c) => (await c.query('SELECT * FROM lockd.auth_lookup($1)', [email])).rowCount,
-  );
-  if (exists) await deliverLocal(email, 'reset', token);
 }
 export async function resetPassword(token: string, password: string) {
   const p = await passwordHash(password);
@@ -95,12 +82,4 @@ export async function currentUser(ctx: Context) {
     ctx,
     async (c) => (await c.query('SELECT lockd.actor_id() AS id')).rows[0].id as string | null,
   );
-}
-export async function readLocalToken(id: string) {
-  return JSON.parse(await readFile(`.local/mailbox/${id}.json`, 'utf8')) as {
-    recipient: string;
-    kind: string;
-    token: string;
-    createdAt: string;
-  };
 }

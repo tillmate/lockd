@@ -12,10 +12,19 @@ export default defineConfig({
     screenshot: 'only-on-failure',
   },
   reporter: [['list'], ['html', { open: 'never' }]],
-  webServer: {
-    command: 'npm run dev',
-    url: 'http://127.0.0.1:3100',
-    reuseExistingServer: !process.env.CI,
-    timeout: 120000,
-  },
+  webServer: [
+    {
+      command: 'npm run dev',
+      url: 'http://127.0.0.1:3100',
+      reuseExistingServer: !process.env.CI,
+      timeout: 120000,
+    },
+    // Delivers queued email to the local test mailbox; journeys read verification links there.
+    {
+      command: 'npm run worker',
+      url: 'http://127.0.0.1:3101/health',
+      reuseExistingServer: !process.env.CI,
+      timeout: 60000,
+    },
+  ],
 });

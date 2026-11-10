@@ -145,6 +145,14 @@ export async function POST(req: NextRequest, { params }: Params) {
       setSession(res, 'lockd_client', d.token, 3600);
       return res;
     }
+    if (path[0] === 'bookings' && path.length === 3 && path[2] === 'request-link') {
+      const bid = z.uuid().parse(path[1]);
+      const d = z.object({ email: z.email().max(254) }).parse(parse());
+      await limit(`link:${bid}`, 5);
+      await limit(`link:email:${d.email.toLowerCase()}`, 10);
+      await service.requestGuestLink(bid, d);
+      return NextResponse.json({ ok: true });
+    }
     if (path[0] === 'bookings' && path.length === 3) {
       const bid = z.uuid().parse(path[1]);
       const action = path[2];
