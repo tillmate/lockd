@@ -1,5 +1,7 @@
 # Lockd
 
+[![Lockd checks](https://github.com/tillmate/lockd/actions/workflows/ci.yml/badge.svg)](https://github.com/tillmate/lockd/actions/workflows/ci.yml)
+
 Jamaican DJ-first booking software. **Local development implementation; not a production service.** Event deposits go directly to the DJ. This app does not collect, hold, capture or refund money.
 
 The first working slice is: verified DJ account → profile/package/payment instructions → public booking page → 48-hour hold → immutable signed agreement → private receipt evidence → DJ actual-receipt attestation → confirmed booking.

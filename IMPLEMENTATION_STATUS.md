@@ -17,7 +17,7 @@
 | Expiry and client confirmation | EXISTS / PARTIAL | Transactional expiry on access/allocation + `scripts/worker.ts`; private page updates every 30s. Notification outbox persists events; external delivery is missing. |
 | Completed event | EXISTS | Owning DJ may complete ended confirmed events, idempotently; review invitation workflow is missing. |
 | Multi-tenant authorization and private files | EXISTS | RLS, restricted runtime role, server-only functions, guest capability reads, private attachment downloads. |
-| Local/CI test tooling | EXISTS | `scripts/local-db.ts`, migration ledger, `tests/booking.test.ts`, Playwright browser test and GitHub Actions. CI remote result recorded after publication. |
+| Local/CI test tooling | EXISTS | `scripts/local-db.ts`, migration ledger, `tests/booking.test.ts`, Playwright browser test and GitHub Actions. Fresh Linux/PostgreSQL CI passed. |
 | Subscriptions / manual invoices / founding seats | MISSING | All accounts currently Free; no self-service Pro bypass, invoice collection or bank data invented. |
 | Cancellations / refunds / reschedules | MISSING | Documented next vertical slice. No UI claims these operations are available. |
 | Staff RBAC/MFA / moderation / privacy operations | MISSING | Launch blocker; no public staff route or fabricated admin controls. |
@@ -39,10 +39,14 @@
 
 ## Verification evidence
 
+- Public repository: https://github.com/tillmate/lockd (verified public, unauthenticated HTTP 200). Implementation commit `67afd7dfd52dd2516be88522af2d39f1b2f25015`.
+- **GitHub CI passed**: https://github.com/tillmate/lockd/actions/runs/42746431820 — fresh Ubuntu runner, PostgreSQL 18 service, clean dependency installation, migrations, typecheck, lint, 29 integration tests, Playwright browser journey, optimized build and vulnerability audit. Job duration: 1m24s. This report's final update changes documentation only.
+
 - `npm test`: **29 PostgreSQL integration tests passed**. Includes independent-connection conflict/cap races, cross-service buffers/overnight bookings, exact expiry, delayed-lock expiry, one grace only, raw database exclusion, tenant isolation, private receipts, immutable data, partial/rejected/late payment, duplicate/replay handling, auth expiry/reset and signed snapshots.
 - `npm run typecheck`: passed.
 - `npm run lint`: passed without warnings after replacing full-page navigation with the router.
 - `npm run build`: passed (all 14 application routes compile).
+- `git diff --cached --check`: passed for application source. Original handover Markdown intentionally retains its supplied two-space line breaks. Both supplied root documents were verified byte-for-byte unchanged.
 - `npm audit --audit-level=moderate`: **0 vulnerabilities**. Upgraded Sharp to 0.35.5; pinned patched minimatch override for the lint-tool dependency. Lockfile committed.
 - `npm run test:e2e`: **1 complete end-to-end browser test passed (24.5 seconds)** after final narrow-layout refinement. The test includes all six required viewport widths.
 - Browser journey uses two separately registered, verified, onboarded test DJs and an account-free client. It asserts cross-DJ booking/receipt denial, cross-origin mutation rejection, pending status after upload, explicit DJ verification, persistent confirmed state after reload, and no browser exceptions.
