@@ -39,3 +39,50 @@ jobs:
       - run: npm run test:e2e
       - run: npm run build
       - run: npm audit --audit-level=moderate
+  managed-postgres:
+    # Render-like conditions: Postgres 16/17, a non-superuser database owner with CREATEROLE,
+    # base64 generated secrets and role URLs composed from parts, through the real staging release.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ['16', '17']
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}-alpine
+        env:
+          POSTGRES_PASSWORD: local_ci_only
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      LOCKD_ENV: staging
+      MIGRATION_DATABASE_URL: postgresql://lockd_owner:owner_ci_only@127.0.0.1:5432/lockd
+      DB_HOST: 127.0.0.1
+      DB_PORT: '5432'
+      DB_NAME: lockd
+      RUNTIME_DB_PASSWORD: rt/Generated+Secret==
+      NOTIFIER_DB_PASSWORD: nt/Generated+Secret==
+      DEMO_DJ_PASSWORD: demo-dj-password-ci-only
+      DEMO_STAFF_PASSWORD: demo-staff-password-ci-only
+      APP_ORIGIN: http://127.0.0.1:3100
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Create a non-superuser database owner, as on a managed host
+        run: node --input-type=module -e "import pg from 'pg'; const c=new pg.Client({connectionString:'postgresql://postgres:local_ci_only@127.0.0.1:5432/postgres'}); await c.connect(); await c.query(\"CREATE ROLE lockd_owner LOGIN CREATEROLE CREATEDB PASSWORD 'owner_ci_only'\"); await c.query('GRANT pg_signal_backend TO lockd_owner'); await c.query('CREATE DATABASE lockd OWNER lockd_owner'); await c.end();"
+      - name: Generate base64 keys, as the hosting provider does
+        run: node --input-type=module -e "import {randomBytes} from 'node:crypto'; import {appendFileSync} from 'node:fs'; appendFileSync(process.env.GITHUB_ENV, 'STAFF_MFA_KEY='+randomBytes(32).toString('base64')+'\nNOTIFICATION_KEY='+randomBytes(32).toString('base64')+'\n');"
+      - run: npm run staging:release
+      - name: Release again (every deploy re-runs it)
+        run: npm run staging:release
+      - run: npm run staging:smoke
+      - name: Database suite with the non-superuser owner
+        env:
+          DATABASE_URL: postgresql://lockd_runtime:rt%2FGenerated%2BSecret%3D%3D@127.0.0.1:5432/lockd
+          NOTIFIER_DATABASE_URL: postgresql://lockd_notifier:nt%2FGenerated%2BSecret%3D%3D@127.0.0.1:5432/lockd
+        run: npm test

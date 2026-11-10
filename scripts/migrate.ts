@@ -1,9 +1,12 @@
 import pg from 'pg';
 import { readdirSync, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-export async function migrate(url: string) {
+// Remote databases are only migrated by the reviewed staging release (scripts/staging-release.ts),
+// which must pass allowRemote and run with LOCKD_ENV=staging. Production has no path here.
+export async function migrate(url: string, { allowRemote = false } = {}) {
   const u = new URL(url);
-  if (!['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname))
+  const local = ['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname);
+  if (!local && !(allowRemote && process.env.LOCKD_ENV === 'staging'))
     throw new Error(
       'Migration tool only permits a local database. Remote migrations require a separately reviewed release process.',
     );

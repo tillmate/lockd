@@ -3,6 +3,7 @@ import Link from 'next/link';
 import Image from 'next/image';
 import './globals.css';
 import { localMode } from '@/lib/auth';
+import { stagingMode } from '@/lib/env';
 export const metadata: Metadata = {
   title: 'Lockd — Lock di date',
   description: 'Direct DJ bookings, signed agreements and verified deposits in Jamaica.',
@@ -30,6 +31,11 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           <div className="local">
             Local development · No funds move through this app{' '}
             <Link href="/dev/mailbox">Test mailbox ↗</Link>
+          </div>
+        )}
+        {stagingMode() && (
+          <div className="local">
+            Staging demo · Synthetic data only · No real payments or emails
           </div>
         )}
         <main id="main">{children}</main>

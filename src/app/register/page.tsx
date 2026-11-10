@@ -1,4 +1,6 @@
+import Link from 'next/link';
 import { AuthForm } from '@/components/forms';
+import { emailEnabled, stagingMode } from '@/lib/env';
 export default function Page() {
   return (
     <div className="auth-grid shell">
@@ -22,7 +24,20 @@ export default function Page() {
           <p>One link for packages, agreements and deposits.</p>
         </div>
       </section>
-      <AuthForm mode="register" />
+      {stagingMode() && !emailEnabled() ? (
+        <div className="card form">
+          <h2>Sign-up is off on this demo.</h2>
+          <p>
+            New accounts need a verification email, and email is not enabled on the staging demo.
+            Sign in with the demo DJ account instead.
+          </p>
+          <Link className="button" href="/login">
+            Go to sign in
+          </Link>
+        </div>
+      ) : (
+        <AuthForm mode="register" />
+      )}
     </div>
   );
 }

@@ -33,6 +33,10 @@ Development moved from the OpenAI Codex session to Claude Code. Nothing below is
 4. No public reviews workflow (handover sequence item 7; correctly deferred).
 5. Launch dependencies outside code: legal/privacy sign-off, real Lockd bank details, email provider account and domain, production hosting.
 
+## Staging demo (prepared, not yet deployed)
+
+Render blueprint ([render.yaml](render.yaml)) and guide ([docs/STAGING.md](docs/STAGING.md)) for a public demo with synthetic data, no email and no payments: web service + managed Postgres, generated secrets, a pre-deploy `staging:release` (migrations behind an explicit staging gate, restricted-role passwords, idempotent demo seed) and a `staging:smoke` check. Seeded: three demo DJs, a demo DJ login and a demo staff login (authenticator enrolled from the Render Shell). Sign-up and password reset are off until an email provider is configured. Rehearsed locally on a throwaway database; CI now also runs the release, smoke check and database suite on Postgres 16 and 17 with a non-superuser database owner. **Deployment needs the owner to create the Blueprint in their Render account.**
+
 ## Current milestone — post-release review fixes and case-scoped support access
 
 **Implemented and tested locally.** Migrations `db/012_review_hardening.sql` and `db/013_support_cases.sql` (ADR 011/012 addendum, ADR 013).

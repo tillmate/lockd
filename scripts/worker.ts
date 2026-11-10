@@ -3,14 +3,15 @@ import pg from 'pg';
 import { dispatch, enqueueReminders, expireHolds } from '../src/lib/notify/dispatcher.js';
 import { deliveryConfig } from '../src/lib/notify/transport.js';
 import { keyConfigured } from '../src/lib/mfa.js';
+import { appOrigin, notifierDatabaseUrl } from '../src/lib/env.js';
 try {
   process.loadEnvFile('.env.local');
 } catch {
   /* CI/environment */
 }
-const origin = process.env.APP_ORIGIN;
+const origin = appOrigin();
 if (!origin) throw new Error('APP_ORIGIN is required for links in notifications');
-const notifierUrl = process.env.NOTIFIER_DATABASE_URL;
+const notifierUrl = notifierDatabaseUrl();
 if (!notifierUrl) throw new Error('NOTIFIER_DATABASE_URL is required for the worker');
 const config = deliveryConfig();
 // Without the web app's key every queued link email would be undeliverable; fail fast instead.

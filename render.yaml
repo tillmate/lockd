@@ -1,0 +1,62 @@
+# Lockd staging demo on Render (docs/STAGING.md). Synthetic data only; no email provider, no
+# payments. Create it from the Render dashboard: New > Blueprint > this repository.
+databases:
+  - name: lockd-staging-db
+    databaseName: lockd
+    plan: basic-256mb
+    postgresMajorVersion: '17'
+    ipAllowList: [] # Reachable only from Render services in this workspace.
+
+services:
+  - type: web
+    name: lockd-staging
+    runtime: node
+    plan: starter # Pre-deploy commands need a paid instance.
+    buildCommand: npm ci --include=dev && npm run build
+    # Applies migrations, sets the restricted roles' passwords and seeds demo data.
+    preDeployCommand: npm run staging:release
+    startCommand: npm run start:server
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: '24'
+      - key: LOCKD_ENV
+        value: staging
+      - key: LOCKD_LOCAL_ONLY
+        value: '0'
+      # Owner connection, used only by the pre-deploy release step.
+      - key: MIGRATION_DATABASE_URL
+        fromDatabase:
+          name: lockd-staging-db
+          property: connectionString
+      # The app connects as lockd_runtime and builds its URL from these parts.
+      - key: DB_HOST
+        fromDatabase:
+          name: lockd-staging-db
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: lockd-staging-db
+          property: port
+      - key: DB_NAME
+        fromDatabase:
+          name: lockd-staging-db
+          property: database
+      - fromGroup: lockd-staging-secrets
+
+envVarGroups:
+  - name: lockd-staging-secrets
+    envVars:
+      - key: RUNTIME_DB_PASSWORD
+        generateValue: true
+      - key: NOTIFIER_DB_PASSWORD
+        generateValue: true
+      - key: STAFF_MFA_KEY
+        generateValue: true
+      - key: NOTIFICATION_KEY
+        generateValue: true
+      # Demo logins: read these in the Render dashboard (Environment Groups); never share publicly.
+      - key: DEMO_DJ_PASSWORD
+        generateValue: true
+      - key: DEMO_STAFF_PASSWORD
+        generateValue: true

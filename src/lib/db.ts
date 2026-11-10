@@ -1,13 +1,14 @@
 import pg, { type PoolClient } from 'pg';
 import { createHash } from 'node:crypto';
+import { runtimeDatabaseUrl } from './env';
 export const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
 let pool: pg.Pool | undefined;
 export function database() {
-  if (!process.env.DATABASE_URL)
-    throw new Error('DATABASE_URL is required. Run npm run db:local first.');
+  const url = runtimeDatabaseUrl();
+  if (!url) throw new Error('DATABASE_URL is required. Run npm run db:local first.');
   if (!pool) {
     pool = new pg.Pool({
-      connectionString: process.env.DATABASE_URL,
+      connectionString: url,
       max: 15,
       statement_timeout: 15000,
     });

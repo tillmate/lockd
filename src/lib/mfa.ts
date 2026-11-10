@@ -56,15 +56,29 @@ export function verifyTotp(secret: string, code: string, seconds = Date.now() / 
 }
 // Separate 256-bit keys per purpose: staff authenticator secrets and queued email link tokens.
 export type KeyName = 'STAFF_MFA_KEY' | 'NOTIFICATION_KEY';
-export const keyConfigured = (name: KeyName) => /^[a-f0-9]{64}$/i.test(process.env[name] ?? '');
+// 64 hex characters (db:local) or base64 of exactly 32 bytes (hosting-generated secrets).
+function keyBytes(name: KeyName) {
+  const value = process.env[name] ?? '';
+  if (/^[a-f0-9]{64}$/i.test(value)) return Buffer.from(value, 'hex');
+  if (/^[A-Za-z0-9+/_-]{43}=?$/.test(value)) {
+    const bytes = Buffer.from(
+      value,
+      value.includes('-') || value.includes('_') ? 'base64url' : 'base64',
+    );
+    if (bytes.length === 32) return bytes;
+  }
+  return null;
+}
+export const keyConfigured = (name: KeyName) => keyBytes(name) !== null;
 function key(name: KeyName) {
-  if (!keyConfigured(name))
+  const bytes = keyBytes(name);
+  if (!bytes)
     throw new Error(
       name === 'STAFF_MFA_KEY'
         ? 'Staff MFA encryption is not configured'
         : 'Notification encryption is not configured',
     );
-  return Buffer.from(process.env[name]!, 'hex');
+  return bytes;
 }
 export function encryptSecret(secret: string, name: KeyName = 'STAFF_MFA_KEY') {
   const iv = randomBytes(12),

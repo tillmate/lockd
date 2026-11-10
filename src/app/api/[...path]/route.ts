@@ -7,6 +7,7 @@ import * as service from '@/lib/service';
 import * as billing from '@/lib/billing';
 import * as ops from '@/lib/ops';
 import * as support from '@/lib/support';
+import { emailEnabled, stagingMode } from '@/lib/env';
 import { capability } from '@/lib/validation';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -37,6 +38,9 @@ export async function POST(req: NextRequest, { params }: Params) {
       }
     const raw = Buffer.concat(chunks);
     const parse = () => JSON.parse(raw.toString('utf8')) as unknown;
+    // The staging demo has no email delivery yet: sign-up and reset links could never arrive.
+    if ((route === 'auth/register' || route === 'auth/forgot') && stagingMode() && !emailEnabled())
+      throw new Error('Email is not enabled on this demo. Sign in with the demo account instead.');
     if (route === 'auth/register' || route === 'auth/login') {
       const d = z
         .object({ email: z.email().max(254), password: z.string().min(12).max(128) })

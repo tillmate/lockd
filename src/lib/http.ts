@@ -2,12 +2,13 @@ import { cookies } from 'next/headers';
 import { NextRequest, NextResponse } from 'next/server';
 import { ZodError } from 'zod';
 import { hash, transaction } from './db';
+import { appOrigin } from './env';
 export async function context() {
   const c = await cookies();
   return { session: c.get('lockd_session')?.value, guest: c.get('lockd_client')?.value };
 }
 export function checkOrigin(req: NextRequest) {
-  const origin = process.env.APP_ORIGIN;
+  const origin = appOrigin();
   if (!origin || req.headers.get('origin') !== origin)
     throw new Error('Request origin is not allowed');
 }
@@ -23,7 +24,7 @@ export async function limit(key: string, count: number, seconds = 3600) {
 export function setSession(res: NextResponse, name: string, value: string, maxAge = 43200) {
   res.cookies.set(name, value, {
     httpOnly: true,
-    secure: process.env.APP_ORIGIN?.startsWith('https://') ?? false,
+    secure: appOrigin().startsWith('https://'),
     sameSite: 'strict',
     path: '/',
     maxAge,

@@ -116,7 +116,7 @@ export function deliveryConfig(
   if (provider === 'resend') {
     if (!env.RESEND_API_KEY || !env.EMAIL_FROM)
       throw new Error('EMAIL_PROVIDER=resend requires RESEND_API_KEY and EMAIL_FROM');
-    if (!env.APP_ORIGIN?.startsWith('https://'))
+    if (!(env.APP_ORIGIN || env.RENDER_EXTERNAL_URL || '').startsWith('https://'))
       throw new Error('Real email delivery requires an https APP_ORIGIN for links');
     return {
       transport: resendTransport(env.RESEND_API_KEY, env.EMAIL_FROM, env.EMAIL_REPLY_TO),

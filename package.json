@@ -7,6 +7,7 @@
     "dev": "next dev --hostname 127.0.0.1 --port 3100",
     "build": "next build",
     "start": "next start --hostname 127.0.0.1 --port 3100",
+    "start:server": "next start --hostname 0.0.0.0 --port ${PORT:-3100}",
     "typecheck": "next typegen && tsc --noEmit",
     "lint": "eslint .",
     "db:local": "tsx scripts/local-db.ts",
@@ -15,7 +16,10 @@
     "test:e2e": "playwright test",
     "worker": "tsx scripts/worker.ts",
     "billing:local": "tsx scripts/local-billing.ts",
-    "staff:local": "tsx scripts/local-staff.ts"
+    "staff:local": "tsx scripts/local-staff.ts",
+    "staging:release": "tsx scripts/staging-release.ts",
+    "staging:enroll-staff": "tsx scripts/staging-enroll-staff.ts",
+    "staging:smoke": "tsx scripts/staging-smoke.ts"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.3.0",
