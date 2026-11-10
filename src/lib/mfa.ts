@@ -1,3 +1,4 @@
+import './env'; // Applies staging defaults before any key is read.
 import {
   createCipheriv,
   createDecipheriv,
