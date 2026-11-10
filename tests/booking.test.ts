@@ -66,6 +66,8 @@ beforeAll(async () => {
   delivery.pathname = `/${testName}`;
   notifierUrl = delivery.toString();
   notifier = new pg.Pool({ connectionString: notifierUrl, max: 3 });
+  // DROP DATABASE WITH (FORCE) in teardown may terminate a connection that is still closing.
+  notifier.on('error', () => {});
 });
 afterAll(async () => {
   await closeDatabase();
@@ -1653,6 +1655,7 @@ describe('Transactional notifications', () => {
     await drain(recorder().transport);
     for (const f of djs) for (let i = 0; i < 3; i++) await held(f, 30 + i * 3);
     const second = new pg.Pool({ connectionString: notifierUrl, max: 2 });
+    second.on('error', () => {});
     const a = recorder(),
       b = recorder();
     await Promise.all([
