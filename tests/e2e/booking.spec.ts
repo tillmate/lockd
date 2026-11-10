@@ -68,6 +68,7 @@ test('complete browser journey with two isolated DJs and an account-free client'
   const cp = await client.newPage();
   cp.on('pageerror', (e) => errors.push(e.message));
   await cp.goto(`/dj/${a.slug}`);
+  await expect(cp.getByRole('heading', { name: a.stageName, exact: true })).toBeVisible();
   for (const width of [320, 360, 390, 768, 1024, 1440]) {
     await cp.setViewportSize({ width, height: 1000 });
     expect(await cp.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(
@@ -198,6 +199,7 @@ test('complete browser journey with two isolated DJs and an account-free client'
   expect(amended.agreements[0].content_hash).toBe(confirmed.agreement.content_hash);
   expect(amended.price_minor).toBe(5500000);
   expect(amended.starts_at).not.toBe(confirmed.starts_at);
+  await expect(cp.getByText('The complimentary date change has been used.')).toBeVisible();
   await cp.screenshot({
     path: 'docs/evidence/amended-mobile.png',
     fullPage: true,
@@ -240,6 +242,10 @@ test('complete browser journey with two isolated DJs and an account-free client'
     caret: 'initial',
   });
   await page.reload();
+  await expect(page.getByRole('heading', { name: 'Booking cancelled.' })).toBeVisible();
+  await expect(
+    page.getByText('Client acknowledged actual receipt on', { exact: false }),
+  ).toBeVisible();
   await page.screenshot({
     path: 'docs/evidence/cancelled-refund-desktop.png',
     fullPage: true,
@@ -359,6 +365,7 @@ test('manual subscription invoice requires scoped staff MFA and actual reconcili
   await expect(page.getByText('Pro access active', { exact: true })).toBeVisible();
   await expect(page.getByText(/Founding allocation #/)).toBeVisible();
   await page.goto(`/dashboard/billing/${id}`);
+  await expect(page.getByRole('heading', { name: 'Invoice reconciled.' })).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({
     path: 'docs/evidence/subscription-paid-mobile.png',
@@ -372,6 +379,7 @@ test('manual subscription invoice requires scoped staff MFA and actual reconcili
     ).toBe(true);
   }
   await sp.goto('/staff/billing');
+  await expect(sp.getByRole('heading', { name: 'Reconcile with confidence.' })).toBeVisible();
   await sp.screenshot({
     path: 'docs/evidence/billing-review-desktop.png',
     fullPage: true,
