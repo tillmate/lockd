@@ -5,11 +5,16 @@ let pool: pg.Pool | undefined;
 export function database() {
   if (!process.env.DATABASE_URL)
     throw new Error('DATABASE_URL is required. Run npm run db:local first.');
-  pool ??= new pg.Pool({
-    connectionString: process.env.DATABASE_URL,
-    max: 15,
-    statement_timeout: 15000,
-  });
+  if (!pool) {
+    pool = new pg.Pool({
+      connectionString: process.env.DATABASE_URL,
+      max: 15,
+      statement_timeout: 15000,
+    });
+    // pg-pool re-emits errors from idle clients (database restart, failover); it discards the
+    // broken client, but without a listener the error would crash the process.
+    pool.on('error', (e) => console.error('Database connection error:', e.message));
+  }
   return pool;
 }
 export type Context = { session?: string; guest?: string };

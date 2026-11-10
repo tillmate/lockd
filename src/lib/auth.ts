@@ -2,7 +2,7 @@ import { randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:cry
 import { promisify } from 'node:util';
 import { hash, transaction, type Context } from './db';
 import { credentials } from './validation';
-import { attachSecret } from './notify/secret';
+import { attachSecret, linkEmailsConfigured } from './notify/secret';
 const scrypt = promisify(scryptCallback);
 export const newToken = () => randomBytes(32).toString('hex');
 export async function passwordHash(password: string) {
@@ -25,6 +25,8 @@ export function localMode() {
 // committed atomically with the token; the notification worker delivers it.
 export async function register(input: unknown) {
   const d = credentials.parse(input);
+  // Checked before knowing whether the address exists, so a missing key cannot reveal accounts.
+  if (!linkEmailsConfigured()) throw new Error('Email verification is not configured');
   const token = newToken();
   const p = await passwordHash(d.password);
   await transaction({}, async (c) => {

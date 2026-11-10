@@ -5,7 +5,7 @@ import Link from 'next/link';
 import type { BillingHome, InvoiceDetail } from '@/lib/billing';
 import { date, money } from '@/lib/format';
 import { moneyToMinor } from '@/lib/validation';
-import { api, Area, Field, Notice, Submit, jamaicaISO } from './forms';
+import { api, ApiError, Area, Field, Notice, Submit, jamaicaISO } from './forms';
 const names: Record<string, string> = {
   monthly: 'Pro Monthly',
   annual: 'Pro Annual',
@@ -24,6 +24,7 @@ export function BillingForm({
 }) {
   const [busy, setBusy] = useState(false),
     [error, setError] = useState('');
+  const router = useRouter();
   return (
     <form
       className="form"
@@ -31,11 +32,15 @@ export function BillingForm({
         e.preventDefault();
         setBusy(true);
         setError('');
-        const d = new FormData(e.currentTarget);
+        const form = e.currentTarget,
+          d = new FormData(form);
         try {
           await run(d);
+          form.reset(); // A completed action never leaves its text ready to submit again.
         } catch (e) {
           setError((e as Error).message);
+          // An expired staff step-up is a 403: re-render so the page shows the MFA prompt.
+          if (e instanceof ApiError && e.status === 403) router.refresh();
         } finally {
           setBusy(false);
         }

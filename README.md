@@ -38,10 +38,10 @@ Open [local Lockd](http://127.0.0.1:3100). Run `npm run worker` in a third termi
 After enrolling a synthetic reviewer with `npm run billing:local` (below), grant operational scopes:
 
 ```sh
-npm run staff:local -- reviewer@example.test listings notifications admin
+npm run staff:local -- reviewer@example.test listings support notifications admin
 ```
 
-Sign in as that reviewer and open `/staff`. Enter an authenticator code to unlock staff tools for ten minutes. **Listings** approves new DJs for the public directory or restricts a booking page (new holds pause; existing bookings continue). **Notifications** shows delivery metadata and requeues failed messages. **Admin & audit** grants scopes to other staff and shows every staff action. New DJ accounts are bookable through their own link immediately but appear in the directory only after approval.
+Sign in as that reviewer and open `/staff`. Enter an authenticator code to unlock staff tools for ten minutes. **Listings** approves new DJs for the public directory or restricts a booking page (new holds pause; existing bookings continue). **Support cases** (opened from a listing) give time-limited, audited access to the bookings a problem concerns: link a booking, review its agreement, payments, changes and delivery history, view evidence with a recorded justification, add notes and close with an outcome. **Notifications** shows delivery metadata and requeues failed messages. **Admin & audit** grants scopes to other staff and shows every staff action. Billing is its own scope (the billing script grants it); admin does not include it. New DJ accounts are bookable through their own link immediately but appear in the directory only after approval.
 
 ### Local software billing demonstration
 
@@ -59,7 +59,7 @@ All mailbox messages stay on disk. No financial provider is connected, and no re
 
 ### Email delivery
 
-The worker delivers every booking, agreement, payment-verification, change/cancellation/refund and subscription message plus reminders (see ADR 011). Locally `EMAIL_PROVIDER=local` renders them into the Test mailbox. For a staging trial of real delivery, set on the worker host: `EMAIL_PROVIDER=resend`, `RESEND_API_KEY`, `EMAIL_FROM` (a verified sending domain), an `https` `APP_ORIGIN`, `NOTIFIER_DATABASE_URL`, `NOTIFICATION_KEY` (same value as the web app) and `EMAIL_ALLOWED_DOMAINS` to restrict recipients. `GET http://127.0.0.1:3101/health` reports worker status. A client who loses their private link can request a fresh one on the booking page.
+The worker delivers every booking, agreement, payment-verification, change/cancellation/refund and subscription message plus reminders (see ADR 011). Locally `EMAIL_PROVIDER=local` renders them into the Test mailbox. For a staging trial of real delivery, set on the worker host: `EMAIL_PROVIDER=resend`, `RESEND_API_KEY`, `EMAIL_FROM` (a verified sending domain), an `https` `APP_ORIGIN`, `NOTIFIER_DATABASE_URL` (the worker also runs hold expiry under this role and needs no web-runtime credentials), `NOTIFICATION_KEY` (same value as the web app; the worker refuses to start without it when delivery is enabled) and `EMAIL_ALLOWED_DOMAINS` to restrict recipients. `GET http://127.0.0.1:3101/health` returns 200 when expiry, reminders and delivery have succeeded recently and the outbox listener is connected, otherwise 503. A client who loses their private link can request a fresh one on the booking page.
 
 ## Verification
 

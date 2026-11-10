@@ -19,6 +19,19 @@ async function mail(page: Page, to: string, subject: string | RegExp) {
   }).toPass({ timeout: 30000 });
   return letter;
 }
+// Names the first elements that stick out past the viewport, so a failure says what overflowed.
+async function noOverflow(page: Page) {
+  for (const width of [320, 390, 768, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    const wide = await page.evaluate(() =>
+      [...document.querySelectorAll('body *')]
+        .filter((e) => e.getBoundingClientRect().right > window.innerWidth + 1)
+        .slice(0, 3)
+        .map((e) => `${e.tagName}.${e.className}: ${e.textContent?.slice(0, 40)}`),
+    );
+    expect(wide, `overflow at ${width}px`).toEqual([]);
+  }
+}
 async function setupDJ(page: Page, label: string) {
   const suffix = randomUUID().slice(0, 8),
     email = `${label}-${suffix}@example.test`,
@@ -445,14 +458,15 @@ test('staff review a new listing for the directory, then restrict it with an aud
   });
   const staff = await setupDJ(sp, 'ops-staff');
   const enrollment = await provisionLocalBilling(staff.email);
-  await grantLocalScopes(staff.email, ['listings', 'notifications']);
+  await grantLocalScopes(staff.email, ['listings', 'notifications', 'support']);
   await sp.goto('/staff');
   await expect(sp.getByRole('heading', { name: 'Verify it’s you.' })).toBeVisible();
   await sp.getByLabel('Authenticator code').fill(totp(enrollment.secret));
   await sp.getByRole('button', { name: 'Unlock staff tools' }).click();
   await expect(sp.getByRole('heading', { name: 'Operations.' })).toBeVisible();
   await sp.goto('/staff/admin');
-  await expect(sp.getByRole('heading', { name: 'Access and accountability.' })).toHaveCount(0);
+  // Without the admin scope the page is a plain not-found, not an error.
+  await expect(sp.getByRole('heading', { name: 'We couldn’t find that page.' })).toBeVisible();
   await sp.goto('/staff/listings');
   const card = sp.getByRole('article', { name: dj.stageName, exact: true });
   await expect(card).toContainText(dj.email);
@@ -460,9 +474,90 @@ test('staff review a new listing for the directory, then restrict it with an aud
   await approve.getByLabel('Reason code').selectOption('identity_checked');
   await approve.getByLabel('Review note').fill('Synthetic QA: stage name and contact checked.');
   await approve.getByRole('button', { name: 'Approve listing' }).click();
-  await expect(card.getByRole('status')).toContainText('Listing approved.');
+  // Durable state: the decided listing leaves the pending queue.
+  await expect(card).toHaveCount(0);
   await vp.goto('/');
   await expect(vp.getByText(dj.stageName).first()).toBeVisible();
+  // A client books the newly listed DJ and uploads evidence; support then reviews it in a case.
+  const client = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const cp = await client.newPage();
+  cp.on('pageerror', (e) => errors.push(e.message));
+  await cp.goto(`/dj/${dj.slug}`);
+  const eventDay = new Date(Date.now() + 50 * 86400000).toISOString().slice(0, 10);
+  await cp.getByLabel('Event start (Jamaica time)').fill(`${eventDay}T19:00`);
+  await cp.getByLabel('Your full name').fill('Synthetic Case Client');
+  await cp.getByLabel('Your email').fill(`case-client-${randomUUID().slice(0, 8)}@example.test`);
+  await cp.getByLabel('Event venue / address').fill('TEST venue, Montego Bay');
+  await cp.getByRole('button', { name: 'Hold my date' }).click();
+  await expect(cp.getByRole('heading', { name: 'Your event is taking shape.' })).toBeVisible();
+  const bookingId = cp.url().split('/booking/')[1].split('#')[0];
+  await cp.getByLabel('Full name as your signature').fill('Synthetic Case Client');
+  await cp.getByLabel('I have read and accept this exact agreement').check();
+  await cp.getByRole('button', { name: 'Sign agreement' }).click();
+  await expect(cp.getByText('Signed by Synthetic Case Client')).toBeVisible();
+  await cp.getByLabel('Payment reference', { exact: true }).fill('TEST-CASE-REFERENCE');
+  await cp.getByLabel('Amount you sent (JMD)').fill('27500');
+  await cp.getByLabel('Receipt image').setInputFiles({
+    name: 'synthetic-receipt.png',
+    mimeType: 'image/png',
+    buffer: await sharp({
+      create: { width: 400, height: 200, channels: 3, background: '#dfe8f1' },
+    })
+      .png()
+      .toBuffer(),
+  });
+  await cp.getByRole('button', { name: 'Submit evidence for DJ review' }).click();
+  await expect(cp.getByText('DJ verification pending', { exact: true })).toBeVisible();
+  await client.close();
+  await sp.goto('/staff/listings?state=approved');
+  await sp
+    .getByRole('article', { name: dj.stageName, exact: true })
+    .getByRole('link', { name: 'Open support case' })
+    .click();
+  await expect(
+    sp.getByRole('heading', { name: `Open a case about ${dj.stageName}.` }),
+  ).toBeVisible();
+  await sp.getByLabel('What is it about?').selectOption('payment_discrepancy');
+  await sp.getByLabel('Who raised it?').selectOption('client');
+  await sp.getByLabel('Summary').fill('Client says the deposit was sent; booking still pending.');
+  await sp.getByRole('button', { name: 'Open support case' }).click();
+  await expect(sp).toHaveURL(/\/staff\/cases\/[0-9a-f-]{36}$/);
+  // Nothing private is visible until a booking is linked to the case.
+  await expect(sp.getByText('Synthetic Case Client')).toHaveCount(0);
+  await sp.getByLabel('Booking (date and status only until linked)').selectOption(bookingId);
+  await sp.getByLabel('Why this booking is needed').fill('Client quoted this booking reference.');
+  await sp.getByRole('button', { name: 'Link booking to case' }).click();
+  const linked = sp.getByRole('region', { name: `Booking ${bookingId}` });
+  await expect(linked).toContainText('Synthetic Case Client');
+  await expect(linked).toContainText('TEST-CASE-REFERENCE');
+  await linked.getByText('View evidence image').click();
+  await linked
+    .getByLabel('Why you need to see this image (recorded)')
+    .fill('Compare the transfer reference with the DJ statement.');
+  await linked.getByRole('button', { name: 'Show evidence' }).click();
+  await expect(
+    linked.getByRole('img', { name: 'Client payment evidence (private)' }),
+  ).toBeVisible();
+  await sp.getByLabel('Case note').fill('Asked the DJ to check their account for this transfer.');
+  await sp.getByRole('button', { name: 'Add note' }).click();
+  await expect(
+    sp.getByText('Asked the DJ to check their account for this transfer.'),
+  ).toBeVisible();
+  await noOverflow(sp);
+  await sp.setViewportSize({ width: 1440, height: 1000 });
+  await sp.evaluate(() => window.scrollTo(0, 0));
+  await sp.screenshot({ path: 'docs/evidence/support-case-desktop.png' });
+  await sp.getByLabel('Outcome').selectOption('no_action_needed');
+  await sp
+    .getByLabel('Closing note')
+    .fill('DJ confirmed the transfer arrived; nothing to resolve.');
+  await sp.getByRole('button', { name: 'Close case' }).click();
+  await expect(
+    sp.getByText('This case is closed; booking records are no longer shown.'),
+  ).toBeVisible();
+  await expect(sp.getByText('Synthetic Case Client')).toHaveCount(0);
+  await mail(vp, dj.email, /^Lockd support case #\d+ opened$/);
+  await mail(vp, dj.email, /^Lockd support case #\d+ closed$/);
   await sp.goto('/staff/listings?state=approved');
   const listed = sp.getByRole('article', { name: dj.stageName, exact: true });
   await listed.getByLabel('Reason code').selectOption('fraud_report');
@@ -470,7 +565,7 @@ test('staff review a new listing for the directory, then restrict it with an aud
     .getByLabel('Reason shown to the DJ')
     .fill('Synthetic QA: simulated report for the moderation test.');
   await listed.getByRole('button', { name: 'Restrict listing' }).click();
-  await expect(listed.getByRole('status')).toContainText('Listing restricted.');
+  await expect(listed).toHaveCount(0);
   await vp.goto(`/dj/${dj.slug}`);
   await expect(vp.getByRole('heading', { name: 'We couldn’t find that page.' })).toBeVisible();
   await expect(vp.getByText(dj.stageName)).toHaveCount(0);
@@ -487,20 +582,13 @@ test('staff review a new listing for the directory, then restrict it with an aud
   await expect(sp.getByRole('article', { name: dj.stageName, exact: true })).toContainText(
     'fraud_report',
   );
+  await noOverflow(sp);
+  await sp.setViewportSize({ width: 1440, height: 1000 });
   await sp.screenshot({ path: 'docs/evidence/staff-listings-desktop.png' });
   await sp.goto('/staff/notifications?status=sent');
   await expect(sp.getByRole('heading', { name: 'Every message accounted for.' })).toBeVisible();
   await expect(sp.getByText(dj.email)).toHaveCount(0);
-  for (const width of [320, 390, 768, 1440]) {
-    await sp.setViewportSize({ width, height: 900 });
-    const wide = await sp.evaluate(() =>
-      [...document.querySelectorAll('body *')]
-        .filter((e) => e.getBoundingClientRect().right > window.innerWidth + 1)
-        .slice(0, 3)
-        .map((e) => `${e.tagName}.${e.className}: ${e.textContent?.slice(0, 40)}`),
-    );
-    expect(wide, `overflow at ${width}px`).toEqual([]);
-  }
+  await noOverflow(sp);
   await sp.setViewportSize({ width: 390, height: 844 });
   await sp.screenshot({ path: 'docs/evidence/staff-notifications-mobile.png' });
   expect(errors).toEqual([]);

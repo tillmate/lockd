@@ -16,6 +16,7 @@ import {
 import * as s from '../src/lib/service';
 import * as billing from '../src/lib/billing';
 import * as ops from '../src/lib/ops';
+import * as support from '../src/lib/support';
 import { base32, encryptSecret, totp, verifyTotp } from '../src/lib/mfa';
 import { moneyToMinor } from '../src/lib/validation';
 import { dispatch } from '../src/lib/notify/dispatcher';
@@ -210,7 +211,7 @@ async function expiry(id: string, remainingSeconds: number, grace = false) {
     [id, remainingSeconds, grace],
   );
 }
-async function reviewer() {
+async function reviewer({ billing: billingScope = true } = {}) {
   const f = await fixture(),
     secret = base32(randomBytes(20));
   const uid = (await admin.query('SELECT user_id FROM lockd.accounts WHERE id=$1', [f.account]))
@@ -219,6 +220,11 @@ async function reviewer() {
     'INSERT INTO lockd.billing_staff_members(user_id,secret_cipher,provision_reason) VALUES($1,$2,$3)',
     [uid, encryptSecret(secret), 'Synthetic billing reviewer for isolated tests'],
   );
+  if (billingScope)
+    await admin.query(
+      "INSERT INTO lockd.staff_scopes(user_id,scope,reason) VALUES($1,'billing','Synthetic billing scope for isolated tests')",
+      [uid],
+    );
   const code = totp(secret);
   await billing.stepUp({ session: f.session }, { code });
   return { ...f, secret, code, uid, ctx: { session: f.session } };
@@ -1626,7 +1632,12 @@ describe('Transactional notifications', () => {
       { attempt: 1, outcome: 'retry' },
       { attempt: 2, outcome: 'sent' },
     ]);
-    // The eighth attempt is terminal even for a retryable error.
+    // The eighth recorded attempt is terminal even for a retryable error.
+    for (let attempt = 3; attempt <= 7; attempt++)
+      await admin.query(
+        "INSERT INTO lockd.notification_attempts(outbox_id,attempt,outcome,provider,error) VALUES($1,$2,'retry','recorder','Synthetic earlier attempt')",
+        [request.id, attempt],
+      );
     await admin.query(
       "UPDATE lockd.outbox SET status='pending',attempts=7,next_attempt_at=now() WHERE id=$1",
       [request.id],
@@ -1655,16 +1666,20 @@ describe('Transactional notifications', () => {
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids.length).toBe(12);
   });
-  it('isolates the notifier role from bookings and the runtime from the delivery queue', async () => {
+  it('isolates the worker role from bookings and the runtime from the delivery queue', async () => {
     const f = await fixture(),
       h = await held(f);
     for (const sql of [
       'SELECT * FROM lockd.bookings LIMIT 1',
       'SELECT * FROM lockd.outbox LIMIT 1',
-      'SELECT lockd.expire_all()',
       "SELECT lockd.public_profiles('x')",
+      "SELECT lockd.new_session(gen_random_uuid(),repeat('a',64))",
     ])
       await expect(notifier.query(sql)).rejects.toMatchObject({ code: '42501' });
+    // Hold expiry is the one booking function the worker role may run.
+    expect(
+      (await notifier.query('SELECT lockd.expire_all() AS n')).rows[0].n,
+    ).toBeGreaterThanOrEqual(0);
     await expect(
       notifier.query('SELECT lockd.create_hold($1,$2,$3)', [h.input, 'a'.repeat(64), 'b']),
     ).rejects.toMatchObject({ code: '42501' });
@@ -1692,7 +1707,7 @@ describe('Transactional notifications', () => {
     );
     // Context is only readable for a row currently leased for delivery.
     const id = (await rows(h.id))[0].id;
-    expect((await notifier.query('SELECT lockd.notifier_context($1) AS c', [id])).rows[0].c).toBe(
+    expect((await notifier.query('SELECT lockd.notifier_context($1,1) AS c', [id])).rows[0].c).toBe(
       null,
     );
   });
@@ -1727,11 +1742,14 @@ describe('Transactional notifications', () => {
     const deposit = sent.find((m) => m.id === depositId)!;
     expect(deposit.subject).toMatch(/ends soon/);
     expect(deposit.text).toMatch(/J\$27,500\.00/);
-    expect(sent.find((m) => m.kind === 'verification_reminder')!.to).toBe(f.email);
+    const verifyId = (await reminders(review.id))[0].id;
+    expect(sent.find((m) => m.id === verifyId)!.to).toBe(f.email);
   });
   it('reports payment discrepancies, confirmation and cancellation to the right parties', async () => {
+    const { sent, transport } = recorder();
     const f = await fixture(),
       h = await claimed(f);
+    await drain(transport); // Hold-phase messages go out while the hold is still running.
     await s.verify({ session: f.session }, h.id, decision(h.claim, 1000000));
     const topUp = await s.proof(h.ctx, h.id, 'TEST-TOPUP', 1750000, await png());
     await s.verify({ session: f.session }, h.id, decision(topUp, 1750000));
@@ -1739,7 +1757,6 @@ describe('Transactional notifications', () => {
       reason: 'Synthetic client cancellation',
     });
     await s.decideCancellation({ session: f.session }, h.id, cancelDecision(rid));
-    const { sent, transport } = recorder();
     await drain(transport);
     const mine = new Set((await rows(h.id)).map((r) => r.id));
     const mail = sent.filter((m) => mine.has(m.id));
@@ -1850,7 +1867,7 @@ describe('Transactional notifications', () => {
           priceMinor: 100,
           depositMinor: 100,
           verifiedMinor: 0,
-          expiresAt: now,
+          expiresAt: new Date(Date.now() + 86400000).toISOString(),
           graceUsed: false,
           djName: 'DJ',
           djSlug: 'dj',
@@ -2128,7 +2145,7 @@ describe('Super Admin operations', () => {
     });
     await expect(ops.listings(target.ctx)).rejects.toMatchObject({ code: '42501' });
     const { staff, audit } = await ops.directory(root.ctx);
-    expect(staff.find((m) => m.user_id === target.uid)?.scopes).toEqual([]);
+    expect(staff.find((m) => m.user_id === target.uid)?.scopes).toEqual(['billing']);
     const mine = audit.filter((e) => e.actor === root.email);
     expect(mine.map((e) => e.kind)).toEqual(
       expect.arrayContaining(['SCOPE_REVOKED', 'SCOPE_GRANTED', 'STAFF_MFA_VERIFIED']),
@@ -2137,5 +2154,505 @@ describe('Super Admin operations', () => {
     await expect(ops.directory(target.ctx)).rejects.toMatchObject({ code: '42501' });
     expect(Array.isArray(await ops.listings(root.ctx, 'approved'))).toBe(true);
     expect((await ops.notifications(root.ctx)).counts).toBeTruthy();
+  });
+});
+
+describe('Review hardening', () => {
+  const reject = (claimId: string, reason: string) => ({
+    claimId,
+    decision: 'rejected',
+    amountMinor: 0,
+    bankReference: '',
+    reason,
+    attest: false,
+  });
+  it('classifies rejected evidence by the DJ decision on expired holds and after partial verification', async () => {
+    const f = await fixture();
+    const late = await claimed(f);
+    await expiry(late.id, -30 * 3600, true);
+    expect(
+      await s.verify(
+        { session: f.session },
+        late.id,
+        reject(late.claim, 'No such transfer arrived in my account'),
+      ),
+    ).toBe('HOLD_EXPIRED');
+    const p = await signed(f, 36);
+    const first = await s.proof(p.ctx, p.id, 'TEST-PART', 2750000, await png());
+    await s.verify({ session: f.session }, p.id, decision(first, 1000000));
+    const topUp = await s.proof(p.ctx, p.id, 'TEST-TOPUP', 1750000, await png());
+    expect(
+      await s.verify({ session: f.session }, p.id, reject(topUp, 'Top-up transfer not found')),
+    ).toBe('PARTIAL_VERIFIED');
+    const kinds = await admin.query(
+      "SELECT payload->>'claimId' AS claim,kind,payload->>'decision' AS decision FROM lockd.outbox WHERE dedupe_key LIKE 'verification:%' AND payload->>'bookingId' IN ($1,$2)",
+      [late.id, p.id],
+    );
+    const byClaim = Object.fromEntries(kinds.rows.map((r) => [r.claim, r]));
+    expect(byClaim[late.claim]).toMatchObject({ kind: 'proof_rejected', decision: 'rejected' });
+    expect(byClaim[first]).toMatchObject({ kind: 'partial_verified', decision: 'received' });
+    expect(byClaim[topUp]).toMatchObject({ kind: 'proof_rejected', decision: 'rejected' });
+    const { sent, transport } = recorder();
+    await drain(transport);
+    const mailFor = async (claim: string) => {
+      const id = (
+        await admin.query('SELECT id FROM lockd.outbox WHERE dedupe_key=$1', [
+          `verification:${claim}`,
+        ])
+      ).rows[0].id;
+      return sent.find((m) => m.id === id)!;
+    };
+    const lateMail = await mailFor(late.claim);
+    expect(lateMail.subject).not.toMatch(/recorded a payment/);
+    expect(lateMail.text).toMatch(/No such transfer arrived in my account/);
+    expect(lateMail.text).toMatch(/hold has ended/i);
+    const topUpMail = await mailFor(topUp);
+    expect(topUpMail.subject).not.toMatch(/Part of your deposit/);
+    expect(topUpMail.text).toMatch(/Top-up transfer not found/);
+    expect(topUpMail.text).toMatch(/J\$10,000\.00 of the J\$27,500\.00 deposit/);
+  });
+  it('renews leases per message and counts only recorded attempts toward the budget', async () => {
+    const f = await fixture();
+    await drain(recorder().transport);
+    const h = await held(f);
+    const claimedRows = (await notifier.query('SELECT * FROM lockd.notifier_claim(10,10)')).rows;
+    const mine = claimedRows.filter((r) => r.payload.bookingId === h.id);
+    expect(mine).toHaveLength(2);
+    await admin.query(
+      "UPDATE lockd.outbox SET lease_until=now()-interval '1 second' WHERE payload->>'bookingId'=$1",
+      [h.id],
+    );
+    const ctx = (
+      await notifier.query('SELECT lockd.notifier_context($1,$2) AS c', [
+        mine[0].id,
+        mine[0].attempt,
+      ])
+    ).rows[0].c;
+    expect(ctx.booking.id).toBe(h.id);
+    expect(
+      (
+        await admin.query('SELECT lease_until>now() AS live FROM lockd.outbox WHERE id=$1', [
+          mine[0].id,
+        ])
+      ).rows[0].live,
+    ).toBe(true);
+    expect(
+      (
+        await notifier.query('SELECT lockd.notifier_context($1,$2) AS c', [
+          mine[0].id,
+          mine[0].attempt - 1,
+        ])
+      ).rows[0].c,
+    ).toBeNull();
+    for (const r of mine)
+      await notifier.query('SELECT lockd.notifier_release($1,$2)', [r.id, r.attempt]);
+    expect(
+      (
+        await admin.query(
+          "SELECT bool_and(lease_until IS NULL) AS free FROM lockd.outbox WHERE payload->>'bookingId'=$1",
+          [h.id],
+        )
+      ).rows[0].free,
+    ).toBe(true);
+    // Lost lease generations never make the next transient failure terminal.
+    await admin.query("UPDATE lockd.outbox SET attempts=12 WHERE payload->>'bookingId'=$1", [h.id]);
+    await drain(
+      recorder(() => ({ ok: false, retry: true, error: 'Resend 503: unavailable' })).transport,
+    );
+    for (const r of await rows(h.id)) expect(r).toMatchObject({ status: 'pending', attempts: 13 });
+  });
+  it('keeps link emails and their encrypted links queued when the worker cannot decrypt them', async () => {
+    const f = await fixture();
+    await drain(recorder().transport);
+    const h = await held(f);
+    const original = process.env.NOTIFICATION_KEY;
+    process.env.NOTIFICATION_KEY = randomBytes(32).toString('hex');
+    try {
+      await drain(recorder().transport);
+    } finally {
+      process.env.NOTIFICATION_KEY = original;
+    }
+    const hold = (await rows(h.id)).find((r) => r.kind === 'hold_created')!;
+    expect(hold).toMatchObject({ status: 'pending' });
+    expect(hold.secret_cipher).toBeTruthy();
+    expect(hold.last_error).toMatch(/decrypt/);
+    await admin.query('UPDATE lockd.outbox SET next_attempt_at=now() WHERE id=$1', [hold.id]);
+    const { sent, transport } = recorder();
+    await drain(transport);
+    expect(sent.find((m) => m.id === hold.id)!.action!.url).toBe(
+      `${ORIGIN}/booking/${h.id}#${h.guest}`,
+    );
+  });
+  it('makes billing an explicit scope that admin does not imply', async () => {
+    const x = await invoiceFixture();
+    const operator = await reviewer({ billing: false });
+    await grantScope(operator.uid, 'admin');
+    expect(await billing.staffStatus(operator.ctx)).toEqual({
+      member: true,
+      unlocked: true,
+      billing: false,
+    });
+    await expect(
+      billing.reconcile(operator.ctx, x.id, invoiceDecision(x.claim)),
+    ).rejects.toMatchObject({ code: '42501' });
+    await expect(
+      billing.approve(operator.ctx, {
+        accountId: x.dj.account,
+        reason: 'Synthetic eligibility attempt by an operator',
+        attest: true,
+      }),
+    ).rejects.toMatchObject({ code: '42501' });
+    await expect(billing.queue(operator.ctx)).rejects.toThrow(/Billing staff/);
+    expect(await billing.invoice(operator.ctx, x.id)).toBeNull();
+    expect(await billing.receipt(operator.ctx, x.claim)).toBeFalsy();
+    await expect(
+      ops.setScope(operator.ctx, {
+        userId: operator.uid,
+        scope: 'billing',
+        grant: true,
+        note: 'Synthetic attempt to self-grant billing',
+      }),
+    ).rejects.toMatchObject({ code: '42501' });
+    const colleague = await reviewer({ billing: false });
+    await ops.setScope(operator.ctx, {
+      userId: colleague.uid,
+      scope: 'billing',
+      grant: true,
+      note: 'Synthetic grant of billing to a colleague',
+    });
+    expect(await billing.reconcile(colleague.ctx, x.id, invoiceDecision(x.claim))).toBe('paid');
+  });
+  it('serializes scope changes: mutual revocation keeps one admin; disabled staff can be cleaned up', async () => {
+    const a = await reviewer(),
+      b = await reviewer();
+    await grantScope(a.uid, 'admin');
+    await grantScope(b.uid, 'admin');
+    const results = await Promise.allSettled([
+      ops.setScope(a.ctx, {
+        userId: b.uid,
+        scope: 'admin',
+        grant: false,
+        note: 'Synthetic concurrent revocation by A',
+      }),
+      ops.setScope(b.ctx, {
+        userId: a.uid,
+        scope: 'admin',
+        grant: false,
+        note: 'Synthetic concurrent revocation by B',
+      }),
+    ]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const remaining = await admin.query(
+      "SELECT user_id FROM lockd.staff_scopes WHERE scope='admin' AND user_id IN ($1,$2)",
+      [a.uid, b.uid],
+    );
+    expect(remaining.rowCount).toBe(1);
+    const survivor = remaining.rows[0].user_id === a.uid ? a : b;
+    const leaver = await reviewer();
+    await grantScope(leaver.uid, 'listings');
+    await admin.query('UPDATE lockd.billing_staff_members SET enabled=false WHERE user_id=$1', [
+      leaver.uid,
+    ]);
+    await ops.setScope(survivor.ctx, {
+      userId: leaver.uid,
+      scope: 'listings',
+      grant: false,
+      note: 'Synthetic clean-up after a departure',
+    });
+    await expect(
+      ops.setScope(survivor.ctx, {
+        userId: leaver.uid,
+        scope: 'listings',
+        grant: true,
+        note: 'Synthetic re-grant to a disabled member',
+      }),
+    ).rejects.toThrow(/enabled/);
+    const { audit } = await ops.directory(survivor.ctx);
+    expect(
+      audit.find((e) => e.kind === 'SCOPE_REVOKED' && e.subject?.startsWith(leaver.email))?.subject,
+    ).toBe(`${leaver.email} · listings`);
+    // A staff member's own DJ self-service billing is not presented as a staff action.
+    await enableBilling();
+    await billing.issue(
+      { session: survivor.session },
+      {
+        plan: 'monthly',
+        billingName: 'Synthetic Staff DJ',
+        billingEmail: survivor.email,
+        requestId: randomUUID(),
+      },
+    );
+    const after = await ops.directory(survivor.ctx);
+    expect(after.audit.some((e) => e.actor === survivor.email && e.kind === 'INVOICE_ISSUED')).toBe(
+      false,
+    );
+    expect(
+      after.audit.some((e) => e.actor === survivor.email && e.kind === 'STAFF_MFA_VERIFIED'),
+    ).toBe(true);
+  });
+  it('link recovery ignores failed deliveries in its cap and never matches a NULL address', async () => {
+    const f = await fixture(),
+      h = await held(f);
+    await drain(recorder().transport);
+    for (let i = 0; i < 10; i++) await s.requestGuestLink(h.id, { email: 'client@example.test' });
+    await drain(failAll());
+    await s.requestGuestLink(h.id, { email: 'client@example.test' });
+    expect(
+      (await rows(h.id)).filter((r) => r.kind === 'booking_link' && r.status === 'pending'),
+    ).toHaveLength(1);
+    const before = (
+      await admin.query('SELECT count(*)::int n FROM lockd.guest_links WHERE booking_id=$1', [h.id])
+    ).rows[0].n;
+    await transaction({}, (c) =>
+      c.query('SELECT lockd.request_guest_link($1,NULL,$2)', [h.id, hash(newToken())]),
+    );
+    expect(
+      (
+        await admin.query('SELECT count(*)::int n FROM lockd.guest_links WHERE booking_id=$1', [
+          h.id,
+        ])
+      ).rows[0].n,
+    ).toBe(before);
+  });
+  it('lets reminders run beside hold expiry without account locks, under the worker role', async () => {
+    const fk = await admin.query(
+      "SELECT count(*)::int n FROM pg_constraint WHERE conrelid='lockd.outbox'::regclass AND contype='f' AND conkey @> ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid='lockd.outbox'::regclass AND attname='account_id')]",
+    );
+    expect(fk.rows[0].n).toBe(0);
+    const f = await fixture(),
+      h = await held(f, 26);
+    await expiry(h.id, 35 * 3600);
+    const results = await Promise.all([
+      notifier.query('SELECT lockd.expire_all() AS n'),
+      notifier.query('SELECT lockd.enqueue_due_reminders() AS n'),
+      notifier.query('SELECT lockd.expire_all() AS n'),
+    ]);
+    expect(results).toHaveLength(3);
+    expect((await rows(h.id)).some((r) => r.kind === 'agreement_reminder')).toBe(true);
+  });
+});
+
+async function supportStaff() {
+  const staff = await reviewer({ billing: false });
+  await grantScope(staff.uid, 'support');
+  return staff;
+}
+const caseInput = (account: string, category = 'payment_discrepancy') => ({
+  accountId: account,
+  category,
+  requester: 'client',
+  summary: 'Client says the deposit was sent but the booking is still pending',
+});
+
+describe('Case-scoped support access', () => {
+  it('opens cases only with the support scope and fresh MFA, never about the staff member', async () => {
+    const f = await fixture(),
+      staff = await supportStaff(),
+      billingOnly = await reviewer();
+    await expect(support.openCase(billingOnly.ctx, caseInput(f.account))).rejects.toMatchObject({
+      code: '42501',
+    });
+    await expect(
+      support.openCase({ session: f.session }, caseInput(f.account)),
+    ).rejects.toMatchObject({ code: '42501' });
+    await expect(support.openCase(staff.ctx, caseInput(staff.account))).rejects.toMatchObject({
+      code: '42501',
+    });
+    const id = await support.openCase(staff.ctx, caseInput(f.account));
+    const listed = (await support.cases(staff.ctx, 'open')).find((c) => c.id === id)!;
+    expect(listed).toMatchObject({ state: 'open', category: 'payment_discrepancy', linked: 0 });
+    await admin.query(
+      "UPDATE lockd.billing_staff_sessions SET expires_at=now()-interval '1 second' WHERE user_id=$1",
+      [staff.uid],
+    );
+    await expect(support.viewCase(staff.ctx, id)).rejects.toMatchObject({ code: '42501' });
+    // Cases about a staff member's own account are hidden from them.
+    const colleague = await supportStaff();
+    const aboutStaff = await support.openCase(colleague.ctx, caseInput(staff.account));
+    const fresh = await supportStaff();
+    await expect(support.viewCase(staff.ctx, aboutStaff)).rejects.toMatchObject({ code: '42501' });
+    expect((await support.cases(fresh.ctx)).some((c) => c.id === aboutStaff)).toBe(true);
+    for (const t of ['support_cases', 'support_case_bookings', 'support_case_notes'])
+      await expect(
+        transaction(fresh.ctx, (c) => c.query(`SELECT * FROM lockd.${t}`)),
+      ).rejects.toMatchObject({ code: '42501' });
+  });
+  it('shows records only for linked bookings of the case DJ while access is live, without secrets', async () => {
+    const f = await fixture(),
+      h = await claimed(f),
+      other = await held(f, 40),
+      foreign = await held(await fixture()),
+      staff = await supportStaff();
+    const id = await support.openCase(staff.ctx, caseInput(f.account));
+    let v = await support.viewCase(staff.ctx, id);
+    expect(v.records).toEqual([]);
+    expect(v.candidates!.map((c) => c.id).sort()).toEqual([h.id, other.id].sort());
+    expect(JSON.stringify(v.candidates)).not.toContain('Synthetic Client');
+    await expect(
+      support.linkBooking(staff.ctx, id, {
+        bookingId: foreign.id,
+        reason: 'Client gave this booking reference by email',
+      }),
+    ).rejects.toThrow(/does not belong to this DJ/);
+    await support.linkBooking(staff.ctx, id, {
+      bookingId: h.id,
+      reason: 'Client gave this booking reference by email',
+    });
+    v = await support.viewCase(staff.ctx, id);
+    expect(v.records).toHaveLength(1);
+    const r = v.records![0];
+    expect(r.booking).toMatchObject({ id: h.id, clientEmail: 'client@example.test' });
+    expect(r.claims[0]).toMatchObject({ reference: 'TEST-CLAIM', claimedMinor: 2750000 });
+    expect(r.agreements[0].body).toMatch(/TEST AGREEMENT/);
+    expect(r.agreements[0].signatures[0].signer).toBe('Synthetic Client');
+    expect(r.deliveries.length).toBeGreaterThan(0);
+    const json = JSON.stringify(v);
+    for (const secret of [
+      h.guest,
+      hash(h.guest),
+      'guest_hash',
+      'request_hash',
+      'secret_cipher',
+      '"image"',
+    ])
+      expect(json).not.toContain(secret);
+    expect(r.deliveries.every((d) => d.recipient.includes('•••@'))).toBe(true);
+    const views = await admin.query(
+      "SELECT count(*)::int n FROM lockd.staff_events WHERE kind='CASE_RECORDS_VIEWED' AND subject_id=$1",
+      [id],
+    );
+    expect(views.rows[0].n).toBe(1);
+    await admin.query(
+      "UPDATE lockd.support_cases SET access_expires_at=now()-interval '1 second' WHERE id=$1",
+      [id],
+    );
+    v = await support.viewCase(staff.ctx, id);
+    expect(v.case.recordsAvailable).toBe(false);
+    expect(v.records).toBeUndefined();
+    expect(v.candidates).toBeUndefined();
+    await expect(
+      support.linkBooking(staff.ctx, id, {
+        bookingId: other.id,
+        reason: 'Second booking mentioned by the client',
+      }),
+    ).rejects.toThrow(/access has ended/);
+  });
+  it('releases one evidence image per justified request, only for linked bookings, and audits it', async () => {
+    const f = await fixture(),
+      h = await claimed(f),
+      elsewhere = await claimed(await fixture()),
+      staff = await supportStaff();
+    const id = await support.openCase(staff.ctx, caseInput(f.account));
+    await support.linkBooking(staff.ctx, id, {
+      bookingId: h.id,
+      reason: 'Client gave this booking reference by email',
+    });
+    await expect(
+      support.caseReceipt(staff.ctx, id, { claimId: h.claim, justification: 'short' }),
+    ).rejects.toThrow();
+    await expect(
+      transaction(staff.ctx, (c) =>
+        c.query("SELECT lockd.support_case_receipt($1,$2,'too short')", [id, h.claim]),
+      ),
+    ).rejects.toThrow(/Explain why/);
+    await expect(
+      support.caseReceipt(staff.ctx, id, {
+        claimId: elsewhere.claim,
+        justification: 'Checking a receipt from another DJ',
+      }),
+    ).rejects.toThrow(/not part of a booking linked/);
+    const image = await support.caseReceipt(staff.ctx, id, {
+      claimId: h.claim,
+      justification: 'Compare the transfer reference with the DJ bank statement',
+    });
+    const stored = (await admin.query('SELECT image FROM lockd.claims WHERE id=$1', [h.claim]))
+      .rows[0].image as Buffer;
+    expect(Buffer.compare(image, stored)).toBe(0);
+    const audit = await admin.query(
+      "SELECT note,details->>'claimId' AS claim FROM lockd.staff_events WHERE kind='CASE_EVIDENCE_VIEWED' AND subject_id=$1",
+      [id],
+    );
+    expect(audit.rows).toEqual([
+      { note: 'Compare the transfer reference with the DJ bank statement', claim: h.claim },
+    ]);
+  });
+  it('keeps notes, extensions and closure append-only and tells the DJ about non-fraud cases', async () => {
+    const f = await fixture(),
+      h = await held(f),
+      staff = await supportStaff();
+    await drain(recorder().transport);
+    const id = await support.openCase(staff.ctx, caseInput(f.account, 'cancellation_refund'));
+    await support.linkBooking(staff.ctx, id, {
+      bookingId: h.id,
+      reason: 'DJ asked for help with this booking',
+    });
+    await support.addNote(staff.ctx, id, {
+      body: 'Called the DJ; refund sent yesterday by bank transfer',
+    });
+    for (let i = 0; i < 3; i++)
+      await support.extendAccess(staff.ctx, id, {
+        reason: 'Waiting for the client to confirm receipt',
+      });
+    await expect(
+      support.extendAccess(staff.ctx, id, { reason: 'Waiting for the client to confirm receipt' }),
+    ).rejects.toThrow(/three times/);
+    await support.closeCase(staff.ctx, id, {
+      outcome: 'refund_confirmed',
+      note: 'Client confirmed the refund arrived in their account',
+    });
+    const v = await support.viewCase(staff.ctx, id);
+    expect(v.case).toMatchObject({
+      state: 'closed',
+      outcome: 'refund_confirmed',
+      recordsAvailable: false,
+    });
+    expect(v.notes.map((n) => n.body)).toEqual([
+      'Called the DJ; refund sent yesterday by bank transfer',
+    ]);
+    await expect(
+      support.addNote(staff.ctx, id, { body: 'A note after the case was closed' }),
+    ).rejects.toThrow(/Closed cases/);
+    await expect(
+      support.closeCase(staff.ctx, id, { outcome: 'other', note: 'Closing the same case twice' }),
+    ).rejects.toThrow(/already closed/);
+    await expect(
+      admin.query("UPDATE lockd.support_cases SET summary='rewritten summary text' WHERE id=$1", [
+        id,
+      ]),
+    ).rejects.toThrow(/Immutable/);
+    await expect(
+      admin.query(
+        "UPDATE lockd.support_case_notes SET body='rewritten note body' WHERE case_id=$1",
+        [id],
+      ),
+    ).rejects.toThrow(/Immutable/);
+    const fraud = await support.openCase(staff.ctx, caseInput(f.account, 'fraud_report'));
+    await support.closeCase(staff.ctx, fraud, {
+      outcome: 'no_action_needed',
+      note: 'Report was not substantiated by the records',
+    });
+    const { sent, transport } = recorder();
+    await drain(transport);
+    const mine = sent.filter((m) => m.to === f.email && m.kind.startsWith('SUPPORT_CASE_'));
+    expect(mine.map((m) => m.kind).sort()).toEqual(['SUPPORT_CASE_CLOSED', 'SUPPORT_CASE_OPENED']);
+    expect(mine.find((m) => m.kind === 'SUPPORT_CASE_CLOSED')!.text).toMatch(/Refund confirmed/);
+    const dj = await support.myCases({ session: f.session });
+    expect(dj.map((c) => c.category)).toEqual(['cancellation_refund']);
+    const { audit } = await ops.directory(
+      await (async () => {
+        const root = await reviewer({ billing: false });
+        await grantScope(root.uid, 'admin');
+        return root.ctx;
+      })(),
+    );
+    expect(audit.filter((e) => e.actor === staff.email).map((e) => e.kind)).toEqual(
+      expect.arrayContaining([
+        'CASE_OPENED',
+        'CASE_BOOKING_LINKED',
+        'CASE_NOTE_ADDED',
+        'CASE_ACCESS_EXTENDED',
+        'CASE_CLOSED',
+      ]),
+    );
   });
 });

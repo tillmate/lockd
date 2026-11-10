@@ -3,6 +3,7 @@ import { redirect } from 'next/navigation';
 import { currentUser } from '@/lib/auth';
 import { context } from '@/lib/http';
 import { dashboard } from '@/lib/service';
+import { labels, myCases } from '@/lib/support';
 import { date, money, statusLabel } from '@/lib/format';
 import { BlockForm, Logout, RemoveBlock } from '@/components/forms';
 export default async function Page() {
@@ -10,6 +11,7 @@ export default async function Page() {
   if (!(await currentUser(ctx))) redirect('/login');
   const d = await dashboard(ctx);
   if (!d) redirect('/onboarding');
+  const openCases = (await myCases(ctx)).filter((c) => c.state === 'open');
   const active = d.bookings.filter(
     (b) =>
       !['HOLD_EXPIRED', 'COMPLETED', 'CANCELLED'].includes(b.status) &&
@@ -51,6 +53,21 @@ export default async function Page() {
           </p>
         </div>
       ) : null}
+      {openCases.length > 0 && (
+        <div className="notice" role="status">
+          <strong>
+            Lockd support is handling{' '}
+            {openCases
+              .map((c) => `case #${c.number} (${labels[c.category] ?? c.category})`)
+              .join(', ')}
+            .
+          </strong>
+          <p>
+            Staff can review only the bookings linked to a case, for a limited time, and every view
+            is recorded. Reply to the case email if you have information that helps.
+          </p>
+        </div>
+      )}
       <div className="stats">
         <div>
           <span>{d.pro ? 'Pro access' : 'Free plan'}</span>

@@ -1,7 +1,7 @@
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 import { ensureLocalMFAKey } from './local-billing.js';
-const valid = ['listings', 'support', 'notifications', 'admin'];
+const valid = ['billing', 'listings', 'support', 'notifications', 'admin'];
 // Grants operational scopes to an already enrolled synthetic staff member (npm run billing:local).
 // Production staff provisioning needs a separately reviewed process.
 export async function grantLocalScopes(email: string, scopes: string[]) {
@@ -28,7 +28,7 @@ export async function grantLocalScopes(email: string, scopes: string[]) {
         [user.id, scope, 'Explicit local synthetic staff provisioning'],
       );
       await c.query(
-        "INSERT INTO lockd.staff_events(actor_id,scope,kind,subject_id,reason_code,note) VALUES($1::uuid,'admin','LOCAL_SCOPE_PROVISIONED',$1::text,$2,'Local synthetic provisioning script; not a production grant')",
+        "INSERT INTO lockd.staff_events(actor_id,scope,kind,subject_id,reason_code,note,details) VALUES($1::uuid,'admin','LOCAL_SCOPE_PROVISIONED',$1::text,'local_provisioning','Local synthetic provisioning script; not a production grant',jsonb_build_object('scope',$2::text))",
         [user.id, scope],
       );
     }

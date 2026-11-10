@@ -42,6 +42,10 @@ export async function provisionLocalBilling(email: string) {
       [user.id, encryptSecret(secret), 'Explicit local synthetic billing reviewer provisioning'],
     );
     await c.query(
+      "INSERT INTO lockd.staff_scopes(user_id,scope,reason) VALUES($1,'billing','Explicit local synthetic billing reviewer provisioning')",
+      [user.id],
+    );
+    await c.query(
       "UPDATE lockd.billing_settings SET enabled=true,business_name='Lockd — SYNTHETIC TEST',instructions='TEST ONLY — no bank details configured. Do not send funds. Synthetic invoice and reconciliation testing only.',verified_by='Local test adapter; no actual bank verification claimed' WHERE singleton",
     );
     await c.query(

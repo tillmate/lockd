@@ -3,7 +3,7 @@ import { transaction, type Context } from './db';
 // Super Admin operations. Every function is enforced in the database (staff_can + fresh MFA);
 // these wrappers only validate shape and map rows.
 const note = z.string().trim().min(10).max(1000);
-export const scopes = ['listings', 'support', 'notifications', 'admin'] as const;
+export const scopes = ['billing', 'listings', 'support', 'notifications', 'admin'] as const;
 export type Scope = (typeof scopes)[number];
 export const listingReason = {
   approved: ['identity_checked', 'profile_complete', 'other'],
@@ -26,11 +26,12 @@ export async function staffAccess(ctx: Context) {
   return transaction(ctx, async (c) => {
     const r = (
       await c.query(
-        'SELECT lockd.staff_secret() IS NOT NULL AS member,lockd.billing_staff() AS unlocked,lockd.staff_scope_list() AS scopes',
+        'SELECT lockd.actor_id() AS self,lockd.staff_secret() IS NOT NULL AS member,lockd.staff_fresh() AS unlocked,lockd.staff_scope_list() AS scopes',
       )
-    ).rows[0] as { member: boolean; unlocked: boolean; scopes: Scope[] };
-    // Admin implies every operational scope; billing comes with staff membership itself.
-    const has = (s: Scope) => r.unlocked && (r.scopes.includes(s) || r.scopes.includes('admin'));
+    ).rows[0] as { self: string | null; member: boolean; unlocked: boolean; scopes: Scope[] };
+    // Mirrors staff_can(): admin implies the operational scopes, never billing.
+    const has = (s: Scope) =>
+      r.unlocked && (r.scopes.includes(s) || (s !== 'billing' && r.scopes.includes('admin')));
     return { ...r, has };
   });
 }
@@ -136,6 +137,7 @@ export async function directory(ctx: Context) {
       actor: string;
       scope: string;
       kind: string;
+      subject: string | null;
       stage_name: string | null;
       reason_code: string | null;
       note: string;

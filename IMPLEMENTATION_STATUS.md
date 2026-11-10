@@ -33,7 +33,41 @@ Development moved from the OpenAI Codex session to Claude Code. Nothing below is
 4. No public reviews workflow (handover sequence item 7; correctly deferred).
 5. Launch dependencies outside code: legal/privacy sign-off, real Lockd bank details, email provider account and domain, production hosting.
 
-## Current milestone — Super Admin operations (scopes, listing moderation, delivery ops, audit)
+## Current milestone — post-release review fixes and case-scoped support access
+
+**Implemented and tested locally.** Migrations `db/012_review_hardening.sql` and `db/013_support_cases.sql` (ADR 011/012 addendum, ADR 013).
+
+**Independent review of the two shipped milestones.** A four-dimension review (SQL security, concurrency/operations, message content, web/UI/tests) returned 36 findings, most reproduced on throwaway databases; each was checked against the code before fixing. Fixed, with regression tests:
+
+| Severity | Finding | Fix |
+|---|---|---|
+| High | A DJ *rejecting* evidence on an expired hold emailed the client "payment recorded … arrange a refund"; a rejected top-up after a partial payment emailed "part of your deposit was verified" | Messages classified by the DJ decision; rejection wording with reason and verified-so-far total |
+| Medium | Every staff scope carried full billing authority (founding approval, reconciliation, receipt images) | Billing is an explicit scope; admin does not imply it; existing billing staff grandfathered |
+| Medium | Reminder job could deadlock with hold expiry through the `outbox.account_id` foreign key | Foreign key dropped (informational column) |
+| Medium | Two admins revoking each other at once could leave zero admins; a just-revoked admin's grant could commit | Advisory lock and re-check after it |
+| Medium | Slow batches skipped rows and burned retry attempts with no record; crash/shutdown did the same | Per-message lease renewal; budget counts recorded attempts; graceful hand-back |
+| Medium | Worker without/mismatched `NOTIFICATION_KEY` destroyed every queued link email | Decrypt failures retry; worker refuses to start with delivery but no key |
+| Medium | Worker crashed on an idle database connection drop | Pool error handlers (worker and web) |
+| Medium | Unpaid holds called "confirmed" in cancellation emails; final verification deadline presented as an upload deadline; late evidence told the DJ to confirm before a past deadline; contradictory "accepted" email after a date change applied | Status- and grace-aware wording; superseded message suppressed |
+| Medium | Staff authorization errors shown as a client booking-link message; expired MFA never re-prompted | Staff guard messages pass through; 403 re-renders the MFA prompt |
+| Low | Startup drained the backlog before health/signals; `/health` always 200; stale hold emails sent after expiry; scope audit lacked the affected person; disabled members' scopes unrevokable; requeue without post-lock MFA re-check; link-recovery cap counted failed deliveries and NULL email failed open; billing email unused; subscription balance rendered from later state; unpublished DJs told they were listed; worker timezone not pinned; service name from editable package; worker held runtime credentials; mailbox partial writes; long emails overflowing at 320 px; scope form flipping with stale text; per-booking recovery rate limit exhaustible by others; registration without key revealing verified accounts | All fixed |
+| Low (pre-existing) | Login/register/hold forms could natively submit a GET with passwords or client details in the URL before hydration | Every submit button stays disabled until hydration |
+
+**Case-scoped support access.**
+
+| Capability | Status | Implementation |
+|---|---|---|
+| Open a case about one DJ (category, requester, summary); support scope + fresh MFA; never own account | EXISTS | `open_support_case`, `/staff/cases/new` (from a listing) |
+| Link bookings with a reason, only that DJ's bookings (composite foreign keys) | EXISTS | `link_support_booking` |
+| Records only for linked bookings while open and within a 72 h window (3 extensions); no bearer secrets; every view audited | EXISTS | `support_case_view`, `/staff/cases/[id]` |
+| Evidence images one at a time with a recorded justification | EXISTS | `support_case_receipt`, `POST /api/staff/cases/:id/receipt` (no-store) |
+| Append-only notes, extension and closure with outcome; closed is final | EXISTS | `add_support_note`, `extend_support_access`, `close_support_case` |
+| DJ emails on open/close and dashboard notice (not for fraud reports) | EXISTS | `SUPPORT_CASE_*` templates, `my_support_cases` |
+| Two-person evidence approval, case assignment, client-facing notices, retention/deletion | MISSING | Deferred (ADR 013) |
+
+**Verification.** `npm test` **83/83** (11 new: decision-based rejection classification on expired holds and after partial payments, per-message lease renewal and recorded-attempt budget, decrypt failures keep links queued, billing as an explicit scope that admin does not imply, serialized scope changes and disabled-member clean-up with audit subjects, link-recovery cap and NULL address, reminders beside expiry under the worker role, support case authorization, linked-only records without secrets plus expiry, justified evidence access with audit, notes/extensions/closure immutability with DJ emails). Browser journeys **3/3**, the staff journey now including a full support case. Typecheck, lint, build and audit clean.
+
+## Previous milestone — Super Admin operations (scopes, listing moderation, delivery ops, audit)
 
 **Implemented and tested locally; GitHub CI passed on `f1035eb`:** https://github.com/tillmate/lockd/actions/runs/42858954816. Builds on the existing billing staff identity and TOTP step-up (ADR 012).
 

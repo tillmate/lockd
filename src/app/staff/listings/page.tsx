@@ -83,6 +83,11 @@ export default async function Page({
                 )}
               </div>
             )}
+            {access.has('support') && (
+              <Link className="secondary" href={`/staff/cases/new?account=${a.id}`}>
+                Open support case
+              </Link>
+            )}
           </article>
         ))}
         {!rows.length && <div className="empty">No {filter} listings.</div>}

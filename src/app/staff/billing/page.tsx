@@ -11,6 +11,8 @@ export default async function Page() {
   const access = await staffStatus(ctx);
   if (!access.member) notFound();
   if (!access.unlocked) return <StaffMFA />;
+  // Billing is its own scope; other staff scopes (even admin) do not include it.
+  if (!access.billing) notFound();
   const data = await queue(ctx);
   return (
     <div className="shell">

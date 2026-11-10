@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { listings, notifications } from '@/lib/ops';
+import { cases } from '@/lib/support';
 import { staffPage, StaffNav } from './access';
 export default async function Page() {
   const page = await staffPage();
@@ -7,6 +8,7 @@ export default async function Page() {
   const { ctx, access } = page;
   const pending = access.has('listings') ? await listings(ctx, 'pending') : null;
   const queue = access.has('notifications') ? (await notifications(ctx, 'failed')).counts : null;
+  const open = access.has('support') ? await cases(ctx, 'open') : null;
   const tiles = [
     {
       href: '/staff/listings',
@@ -14,6 +16,13 @@ export default async function Page() {
       title: 'Listings',
       value: pending ? `${pending.length} awaiting review` : 'Support view',
       text: 'Approve DJs for the directory or restrict a booking page.',
+    },
+    {
+      href: '/staff/cases',
+      show: access.has('support'),
+      title: 'Support cases',
+      value: open ? `${open.length} open` : '',
+      text: 'Case-scoped, time-limited access to the bookings a problem concerns.',
     },
     {
       href: '/staff/notifications',
@@ -24,7 +33,7 @@ export default async function Page() {
     },
     {
       href: '/staff/billing',
-      show: true,
+      show: access.has('billing'),
       title: 'Billing',
       value: 'Invoices & founding places',
       text: 'Reconcile actual software-invoice receipts.',
@@ -44,7 +53,7 @@ export default async function Page() {
         <div>
           <p className="eyebrow">LOCKD STAFF · MFA VERIFIED</p>
           <h1>Operations.</h1>
-          <p>Your scopes: billing{access.scopes.length ? `, ${access.scopes.join(', ')}` : ''}.</p>
+          <p>Your scopes: {access.scopes.length ? access.scopes.join(', ') : 'none yet'}.</p>
         </div>
       </div>
       <StaffNav />

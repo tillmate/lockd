@@ -995,3 +995,17 @@ fieldset {
 .staff-filter {
   gap: 8px;
 }
+img.evidence {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+/* Long unbroken values (email addresses, references) must wrap rather than widen the page. */
+.card h3,
+.card p,
+.card dd,
+.booking-row span {
+  overflow-wrap: anywhere;
+}

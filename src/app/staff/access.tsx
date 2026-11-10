@@ -19,6 +19,7 @@ export function StaffNav() {
     <nav className="staff-nav" aria-label="Staff tools">
       <Link href="/staff">Staff home</Link>
       <Link href="/staff/listings">Listings</Link>
+      <Link href="/staff/cases">Support cases</Link>
       <Link href="/staff/notifications">Notifications</Link>
       <Link href="/staff/billing">Billing</Link>
       <Link href="/staff/admin">Admin & audit</Link>

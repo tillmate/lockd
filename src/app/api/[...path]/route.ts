@@ -6,6 +6,7 @@ import { transaction } from '@/lib/db';
 import * as service from '@/lib/service';
 import * as billing from '@/lib/billing';
 import * as ops from '@/lib/ops';
+import * as support from '@/lib/support';
 import { capability } from '@/lib/validation';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -108,6 +109,30 @@ export async function POST(req: NextRequest, { params }: Params) {
       await ops.setScope(ctx, parse());
       return NextResponse.json({ ok: true });
     }
+    if (route === 'staff/cases')
+      return NextResponse.json({ id: await support.openCase(ctx, parse()) });
+    if (path[0] === 'staff' && path[1] === 'cases' && path.length === 4) {
+      const id = z.uuid().parse(path[2]);
+      const action = path[3];
+      if (action === 'link') await support.linkBooking(ctx, id, parse());
+      else if (action === 'notes') await support.addNote(ctx, id, parse());
+      else if (action === 'extend')
+        return NextResponse.json({ until: await support.extendAccess(ctx, id, parse()) });
+      else if (action === 'close') await support.closeCase(ctx, id, parse());
+      else if (action === 'receipt') {
+        await limit(`case-receipt:${ctx.session ?? 'anonymous'}`, 60);
+        const image = await support.caseReceipt(ctx, id, parse());
+        return new NextResponse(new Uint8Array(image), {
+          headers: {
+            'Content-Type': 'image/png',
+            'Content-Disposition': 'inline; filename="case-evidence.png"',
+            'Cache-Control': 'private, no-store',
+            'X-Content-Type-Options': 'nosniff',
+          },
+        });
+      } else return NextResponse.json({ error: 'Not found' }, { status: 404 });
+      return NextResponse.json({ ok: true });
+    }
     if (path[0] === 'invoices' && path.length === 3) {
       const id = z.uuid().parse(path[1]);
       if (path[2] === 'proof') {
@@ -159,7 +184,10 @@ export async function POST(req: NextRequest, { params }: Params) {
     if (path[0] === 'bookings' && path.length === 3 && path[2] === 'request-link') {
       const bid = z.uuid().parse(path[1]);
       const d = z.object({ email: z.email().max(254) }).parse(parse());
-      await limit(`link:${bid}`, 5);
+      // Keyed by booking and address, so guesses with other addresses cannot use up the real
+      // client's allowance; a coarse per-booking ceiling still stops floods.
+      await limit(`link:${bid}:${d.email.toLowerCase()}`, 5);
+      await limit(`link:${bid}`, 60);
       await limit(`link:email:${d.email.toLowerCase()}`, 10);
       await service.requestGuestLink(bid, d);
       return NextResponse.json({ ok: true });

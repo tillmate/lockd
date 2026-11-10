@@ -42,7 +42,12 @@ export function failure(e: unknown) {
     message = 'This profile, reference or evidence already exists. Check the existing record.';
     status = 409;
   } else if (err.code === '42501') {
-    message = 'Sign in or open your private booking link to continue.';
+    // Staff guards explain themselves (expired MFA, self-action); native permission errors and
+    // client/DJ access denials keep the generic wording.
+    message =
+      !/^permission denied/i.test(err.message) && /staff|MFA|Super Admin/i.test(err.message)
+        ? err.message
+        : 'Sign in or open your private booking link to continue.';
     status = 403;
   } else if (err.code === 'P0001' || !err.code) message = err.message;
   return NextResponse.json({ error: message }, { status });

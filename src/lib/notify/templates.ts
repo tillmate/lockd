@@ -63,6 +63,7 @@ export type NotificationContext = {
   account?: {
     stageName: string;
     slug: string;
+    published?: boolean;
     plan: string | null;
     endsAt: string | null;
     graceEndsAt: string | null;
@@ -126,11 +127,35 @@ export function render(
   }
   if (q.audience === 'user') return fail(`No template for ${q.kind}`);
   if (q.kind.startsWith('LISTING_')) return listing(q, ctx, origin);
+  if (q.kind.startsWith('SUPPORT_CASE_')) return supportCase(q, ctx, origin);
   if (q.kind.startsWith('renewal_') || q.kind === 'pro_lapsed' || q.payload.invoiceId !== undefined)
     return billing(q, ctx, origin);
   const b = ctx.booking;
   if (!b) return fail('Booking context missing');
-  return q.audience === 'client' ? client(q, ctx, b, origin, secret) : dj(q, ctx, b, origin);
+  return q.audience === 'client'
+    ? client(q, ctx, b, origin, now, secret)
+    : dj(q, ctx, b, origin, now);
+}
+const HOLD_STATES = [
+  'AWAITING_SIGNATURE',
+  'AWAITING_DEPOSIT',
+  'VERIFICATION_PENDING',
+  'PROOF_REJECTED',
+  'PARTIAL_VERIFIED',
+];
+// Hold-phase messages are only true while the hold is still running; a message delivered late
+// (retries, a requeue, delivery switched on after a backlog) must not invite payment for a
+// released date.
+const holdLive = (b: Booking, now: number) =>
+  HOLD_STATES.includes(b.status) && Date.parse(b.expiresAt) > now;
+// Evidence received before the original expiry earns one 24-hour verification window; after
+// that the expiry is final and further uploads do not move it.
+function deadline(b: Booking) {
+  if (b.status === 'HOLD_EXPIRED')
+    return 'The hold has ended, so the date is no longer reserved. If you already sent money, contact the DJ about a new date or a direct refund; Lockd does not hold or refund deposits.';
+  return b.graceUsed
+    ? `${b.djName} must verify the funds before ${when(b.expiresAt)}. Uploading more evidence does not extend this deadline, so upload well before then.`
+    : `Upload your receipt before ${when(b.expiresAt)}. Evidence received before then gives the DJ one extra 24-hour window to verify the funds.`;
 }
 
 function client(
@@ -138,6 +163,7 @@ function client(
   ctx: NotificationContext,
   b: Booking,
   origin: string,
+  now: number,
   secret?: string,
 ): RenderResult {
   const url = `${origin}/booking/${b.id}${secret ? `#${secret}` : ''}`;
@@ -151,6 +177,7 @@ function client(
     : 'Open your booking from the private link you saved, or request a fresh link by email from the booking page.';
   switch (q.kind) {
     case 'hold_created':
+      if (!holdLive(b, now)) return skip('Hold no longer active');
       return ok({
         subject: `Your date with ${b.djName} is on hold`,
         heading: 'Your date is held for 48 hours.',
@@ -175,12 +202,13 @@ function client(
         action: open,
       });
     case 'agreement_signed':
+      if (!holdLive(b, now)) return skip('Hold no longer active');
       return ok({
         subject: `Agreement signed for ${b.djName}`,
         heading: 'Agreement signed. Next: pay the deposit directly.',
         paragraphs: [
           `Your signed agreement for ${event} is saved and cannot be changed.`,
-          `Pay ${money(b.depositMinor)} directly to ${b.djName} and upload your receipt before ${when(b.expiresAt)}.`,
+          `Pay ${money(b.depositMinor)} directly to ${b.djName}. ${deadline(b)}`,
           DIRECT,
         ],
         action: open,
@@ -204,7 +232,7 @@ function client(
         heading: 'Your hold ends within 12 hours.',
         paragraphs: [
           `The deposit for ${event} is ${money(b.depositMinor)}; ${money(b.verifiedMinor)} has been verified by the DJ so far.`,
-          `Pay the DJ directly and upload your receipt before ${when(b.expiresAt)}, or the date is released.`,
+          `If the deposit is not verified by ${when(b.expiresAt)}, the date is released. ${deadline(b)}`,
           DIRECT,
         ],
         action: open,
@@ -225,22 +253,30 @@ function client(
         heading: 'Payment difference: deposit not yet complete.',
         paragraphs: [
           `${b.djName} verified ${money(ctx.claim?.amountMinor ?? 0)} against the evidence you uploaded${ctx.claim ? ` (you reported ${money(ctx.claim.claimedMinor)})` : ''}. Total verified: ${money(verified)} of the ${money(b.depositMinor)} deposit.`,
-          `Your date is not confirmed yet. Pay the remaining ${money(Math.max(b.depositMinor - verified, 0))} directly to the DJ and upload the new receipt before ${when(b.expiresAt)}.`,
+          `Your date is not confirmed yet. Pay the remaining ${money(Math.max(b.depositMinor - verified, 0))} directly to the DJ and upload the new receipt. ${deadline(b)}`,
           DIRECT,
         ],
         action: open,
       });
-    case 'proof_rejected':
+    case 'proof_rejected': {
+      // Classified from the DJ's decision; the payload snapshots the status at that moment.
+      const ended = q.payload.status === 'HOLD_EXPIRED' || b.status === 'HOLD_EXPIRED';
       return ok({
         subject: `${b.djName} could not verify your payment`,
         heading: 'Your payment evidence needs attention.',
         paragraphs: [
           `${b.djName} could not find the funds shown in your evidence${ctx.claim?.reason ? `. Reason given: “${ctx.claim.reason}”` : ''}.`,
-          `Your date is not confirmed. Check with your bank or the DJ, then upload corrected evidence before ${when(b.expiresAt)}.`,
+          ...(verified > 0
+            ? [`Verified so far: ${money(verified)} of the ${money(b.depositMinor)} deposit.`]
+            : []),
+          ended
+            ? 'Your hold has ended, so the date is no longer reserved. If you did send money, contact the DJ directly; Lockd does not hold or refund deposits.'
+            : `Your date is not confirmed. Check with your bank or the DJ, then upload corrected evidence. ${deadline(b)}`,
           DIRECT,
         ],
         action: open,
       });
+    }
     case 'hold_expired':
       if (b.status !== 'HOLD_EXPIRED') return skip('Hold no longer expired');
       return ok({
@@ -266,11 +302,18 @@ function client(
   return change(q, ctx, b, open, 'client');
 }
 
-function dj(q: Queued, ctx: NotificationContext, b: Booking, origin: string): RenderResult {
+function dj(
+  q: Queued,
+  ctx: NotificationContext,
+  b: Booking,
+  origin: string,
+  now: number,
+): RenderResult {
   const open = { label: 'Open booking', url: `${origin}/dashboard/bookings/${b.id}` };
   const event = `${b.clientName} · ${b.packageName} on ${when(b.startsAt)} at ${b.venue}`;
   switch (q.kind) {
     case 'booking_request':
+      if (!holdLive(b, now)) return skip('Hold no longer active');
       return ok({
         subject: `New booking request: ${b.clientName}, ${date(b.startsAt)}`,
         heading: 'New booking request, date on hold.',
@@ -281,6 +324,7 @@ function dj(q: Queued, ctx: NotificationContext, b: Booking, origin: string): Re
         action: open,
       });
     case 'agreement_signed':
+      if (!holdLive(b, now)) return skip('Hold no longer active');
       return ok({
         subject: `${b.clientName} signed the agreement`,
         heading: 'Agreement signed.',
@@ -291,13 +335,25 @@ function dj(q: Queued, ctx: NotificationContext, b: Booking, origin: string): Re
         action: open,
       });
     case 'proof_submitted':
+      if (b.status === 'HOLD_EXPIRED')
+        return ok({
+          subject: `Late payment evidence from ${b.clientName}`,
+          heading: 'Evidence arrived after the hold ended.',
+          paragraphs: [
+            `${b.clientName} uploaded evidence of a ${money(ctx.claim?.claimedMinor ?? 0)} payment for ${event}, after the hold ended. The date was released, so this booking cannot be confirmed.`,
+            'If the money did arrive in your account, record it in Lockd and agree a new date or a direct refund with the client.',
+          ],
+          action: { label: 'Review payment evidence', url: open.url },
+        });
       return ok({
         subject: `Payment evidence from ${b.clientName}: verify receipt`,
         heading: 'Check your account before confirming.',
         paragraphs: [
           `${b.clientName} uploaded evidence of a ${money(ctx.claim?.claimedMinor ?? 0)} payment for ${event}.`,
           'A screenshot is not proof of funds. Confirm the money actually arrived in your bank or wallet, then record your verification in Lockd.',
-          `Review before ${when(b.expiresAt)}${b.graceUsed ? ', including the one-time 24-hour verification window' : ''}.`,
+          b.graceUsed
+            ? `Verify before ${when(b.expiresAt)}. This includes the one-time 24-hour verification window and is final; after it the date is released.`
+            : `Verify before ${when(b.expiresAt)}.`,
         ],
         action: { label: 'Review payment evidence', url: open.url },
       });
@@ -354,6 +410,8 @@ function change(
         action: open,
       });
     case 'DATE_CHANGE_ACCEPT':
+      // The final acceptance also emits DATE_CHANGE_APPLIED, which is the message that matters.
+      if (m?.state === 'applied') return skip('Superseded by the applied date change');
       return ok({
         subject: byMe ? 'You accepted the date change' : `${other} accepted the date change`,
         heading: 'Date change accepted.',
@@ -390,7 +448,7 @@ function change(
         heading: 'Cancellation requested.',
         paragraphs: [
           role === 'client'
-            ? `Your request to cancel ${base} was sent to ${b.djName}. The date stays reserved until the DJ reviews it.`
+            ? `Your request to cancel ${base} was sent to ${b.djName}. ${b.status === 'CONFIRMED_LOCKD' ? 'The date stays reserved until the DJ reviews it.' : `Your hold still ends ${when(b.expiresAt)} unless the deposit is verified before then; a pending request does not extend it.`}`
             : `${b.clientName} asked to cancel ${base}. Review the signed agreement and decide any refund of verified funds.`,
         ],
         action: open,
@@ -414,7 +472,7 @@ function change(
         subject: 'Cancellation request declined',
         heading: 'The booking remains active.',
         paragraphs: [
-          `${role === 'client' ? b.djName : 'You'} declined the cancellation request${d?.reason ? `: “${d.reason}”` : ''}. ${base} stays confirmed.`,
+          `${role === 'client' ? b.djName : 'You'} declined the cancellation request${d?.reason ? `: “${d.reason}”` : ''}. ${b.status === 'CONFIRMED_LOCKD' ? `${base} stays confirmed.` : `${base} is still an unconfirmed hold that ends ${when(b.expiresAt)} unless the DJ verifies the deposit before then.`}`,
         ],
         action: open,
       });
@@ -448,18 +506,24 @@ function listing(q: Queued, ctx: NotificationContext, origin: string): RenderRes
   if (!a) return fail('Account context missing');
   const action = { label: 'Open your dashboard', url: `${origin}/dashboard` };
   const reason = String(q.payload.note ?? '');
+  // Visibility also needs the DJ's own published switch; say so instead of promising it.
+  const hidden =
+    a.published === false
+      ? ' Your public profile is switched off in your settings, so it is not visible until you turn it back on.'
+      : '';
   if (q.kind === 'LISTING_APPROVED')
     return ok({
       subject:
         q.payload.from === 'restricted'
           ? 'Your Lockd booking page is active again'
-          : 'You are listed on Lockd',
+          : 'Your Lockd listing is approved',
       heading:
         q.payload.from === 'restricted' ? 'Restriction lifted.' : 'Your listing is approved.',
       paragraphs: [
-        q.payload.from === 'restricted'
-          ? `${a.stageName} can take new holds again, and your page at ${origin}/dj/${a.slug} is visible.`
-          : `${a.stageName} now appears in the Lockd DJ directory. Keep sharing ${origin}/dj/${a.slug} with clients.`,
+        (q.payload.from === 'restricted'
+          ? `${a.stageName} can take new holds again through ${origin}/dj/${a.slug}.`
+          : `${a.stageName} is approved for the Lockd DJ directory. Keep sharing ${origin}/dj/${a.slug} with clients.`) +
+          hidden,
       ],
       action,
     });
@@ -471,6 +535,53 @@ function listing(q: Queued, ctx: NotificationContext, origin: string): RenderRes
         `Lockd restricted ${a.stageName}'s booking page. It is hidden and cannot take new holds. Existing bookings, agreements and records remain available to you and your clients.`,
         ...(reason ? [`Reason: ${reason}`] : []),
         'If you believe this is a mistake, reply to this email with any information that helps us review it.',
+      ],
+      action,
+    });
+  return fail(`No template for ${q.kind}`);
+}
+
+const caseCategories: Record<string, string> = {
+  payment_discrepancy: 'a payment discrepancy',
+  cancellation_refund: 'a cancellation or refund',
+  date_change: 'a date change',
+  no_show: 'a reported no-show',
+  account_access: 'account access',
+  delivery_problem: 'an email delivery problem',
+  other: 'a support request',
+};
+const caseOutcomes: Record<string, string> = {
+  resolved_between_parties: 'Resolved between you and your client.',
+  refund_confirmed: 'Refund confirmed.',
+  no_action_needed: 'No action was needed.',
+  listing_restricted: 'Your listing was restricted; see your dashboard for the reason.',
+  referred_externally: 'Referred to the appropriate party outside Lockd.',
+  duplicate: 'Closed as a duplicate of another case.',
+  other: 'Closed by Lockd support.',
+};
+function supportCase(q: Queued, ctx: NotificationContext, origin: string): RenderResult {
+  const a = ctx.account;
+  if (!a) return fail('Account context missing');
+  const n = q.payload.caseNumber;
+  const about = caseCategories[String(q.payload.category)] ?? 'a support request';
+  const action = { label: 'Open your dashboard', url: `${origin}/dashboard` };
+  if (q.kind === 'SUPPORT_CASE_OPENED')
+    return ok({
+      subject: `Lockd support case #${n} opened`,
+      heading: 'Lockd support is looking into something with you.',
+      paragraphs: [
+        `We opened case #${n} about ${about} on ${a.stageName}'s account. Lockd staff may review the booking records linked to this case for a limited time; every view is recorded.`,
+        'Reply to this email if you have information that helps. Lockd does not move money between you and your clients.',
+      ],
+      action,
+    });
+  if (q.kind === 'SUPPORT_CASE_CLOSED')
+    return ok({
+      subject: `Lockd support case #${n} closed`,
+      heading: 'Support case closed.',
+      paragraphs: [
+        `Case #${n} about ${about} is closed. ${caseOutcomes[String(q.payload.outcome)] ?? caseOutcomes.other}`,
+        'Staff access to the linked booking records has ended.',
       ],
       action,
     });
@@ -524,6 +635,12 @@ function billing(q: Queued, ctx: NotificationContext, origin: string): RenderRes
       });
   }
   const e = ctx.event;
+  // Billing messages snapshot the invoice total at the event (outbox_classify), so a later
+  // reconciliation cannot change what an earlier notice says.
+  const invoiceVerified =
+    typeof q.payload.invoiceVerifiedMinor === 'number'
+      ? q.payload.invoiceVerifiedMinor
+      : (i?.verifiedMinor ?? 0);
   switch (q.kind) {
     case 'INVOICE_ISSUED':
       return ok({
@@ -556,7 +673,7 @@ function billing(q: Queued, ctx: NotificationContext, origin: string): RenderRes
         paragraphs: [
           rejected
             ? `Billing staff could not match your evidence to funds in the Lockd account${e?.reason ? `: “${e.reason}”` : ''}.`
-            : `We verified ${money(Number(e?.details?.amountMinor ?? 0))}. ${money(i!.amountMinor - i!.verifiedMinor)} remains outstanding.`,
+            : `We verified ${money(Number(e?.details?.amountMinor ?? 0))}. ${money(i!.amountMinor - invoiceVerified)} remains outstanding.`,
           'Upload corrected or additional evidence on the invoice once the funds are sent.',
         ],
         action,
@@ -567,7 +684,7 @@ function billing(q: Queued, ctx: NotificationContext, origin: string): RenderRes
         subject: `${plans[i!.plan] ?? 'Pro'} is active`,
         heading: 'Payment verified. Pro is active.',
         paragraphs: [
-          `We verified ${money(i!.verifiedMinor)} for ${label}.${a?.endsAt ? ` Your term runs until ${when(a.endsAt)}.` : ''}`,
+          `We verified ${money(invoiceVerified)} for ${label}.${a?.endsAt ? ` Your term runs until ${when(a.endsAt)}.` : ''}`,
         ],
         action,
       });

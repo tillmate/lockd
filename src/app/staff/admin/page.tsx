@@ -25,14 +25,27 @@ export default async function Page() {
           <article className="card" key={m.user_id} aria-label={m.email}>
             <h3>{m.email}</h3>
             <p>
-              {m.enabled ? 'Enabled' : 'Disabled'} · billing
-              {m.scopes.length ? `, ${m.scopes.join(', ')}` : ''} · enrolled {date(m.created_at)}
+              {m.enabled ? 'Enabled' : 'Disabled'} · scopes:{' '}
+              {m.scopes.length ? m.scopes.join(', ') : 'none'} · enrolled {date(m.created_at)}
             </p>
-            <div className="grid-2">
-              {scopes.map((s) => (
-                <ScopeChange key={s} userId={m.user_id} scope={s} grant={!m.scopes.includes(s)} />
-              ))}
-            </div>
+            {m.user_id === page.access.self ? (
+              <p className="fine">Your own scopes can only be changed by another Super Admin.</p>
+            ) : (
+              <div className="grid-2">
+                {scopes
+                  // Disabled members can only have leftover scopes removed, never new ones granted.
+                  .filter((s) => m.enabled || m.scopes.includes(s))
+                  .map((s) => (
+                    // Keyed by the action so a completed change remounts as a fresh, closed form.
+                    <ScopeChange
+                      key={`${s}:${m.scopes.includes(s)}`}
+                      userId={m.user_id}
+                      scope={s}
+                      grant={!m.scopes.includes(s)}
+                    />
+                  ))}
+              </div>
+            )}
           </article>
         ))}
       </section>
@@ -46,6 +59,7 @@ export default async function Page() {
                 <th>Staff</th>
                 <th>Scope</th>
                 <th>Action</th>
+                <th>Affected</th>
                 <th>DJ</th>
                 <th>Reason</th>
               </tr>
@@ -57,6 +71,7 @@ export default async function Page() {
                   <td>{e.actor}</td>
                   <td>{e.scope}</td>
                   <td>{e.kind.replaceAll('_', ' ').toLowerCase()}</td>
+                  <td>{e.subject ?? '—'}</td>
                   <td>{e.stage_name ?? '—'}</td>
                   <td>
                     {e.reason_code ? `${e.reason_code}: ` : ''}

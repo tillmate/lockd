@@ -7,6 +7,7 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
   const access = await staffStatus(ctx);
   if (!access.member) notFound();
   if (!access.unlocked) redirect('/staff/billing');
+  if (!access.billing) notFound();
   const data = await invoice(ctx, (await params).id);
   if (!data) notFound();
   return <InvoiceView initial={JSON.parse(JSON.stringify(data))} staff />;

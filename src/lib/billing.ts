@@ -32,9 +32,9 @@ export async function staffStatus(ctx: Context) {
     async (c) =>
       (
         await c.query(
-          'SELECT lockd.staff_secret() IS NOT NULL AS member,lockd.billing_staff() AS unlocked',
+          'SELECT lockd.staff_secret() IS NOT NULL AS member,lockd.staff_fresh() AS unlocked,lockd.billing_staff() AS billing',
         )
-      ).rows[0] as { member: boolean; unlocked: boolean },
+      ).rows[0] as { member: boolean; unlocked: boolean; billing: boolean },
   );
 }
 export async function stepUp(ctx: Context, input: unknown) {

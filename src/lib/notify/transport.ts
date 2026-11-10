@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { localMode } from '../auth';
 
 export type Outgoing = {
@@ -16,16 +16,18 @@ export type Transport = { name: string; send(m: Outgoing): Promise<SendResult> }
 
 const MAILBOX = '.local/mailbox';
 // Development transport: writes rendered messages to an ignored local folder. Same id
-// overwrites the same file, so retries never duplicate a message.
+// overwrites the same file, so retries never duplicate a message. Written to a temporary file
+// and renamed, so a reader never sees a half-written message.
 export const localTransport: Transport = {
   name: 'local',
   async send(m) {
     await mkdir(MAILBOX, { recursive: true });
-    await writeFile(
-      `${MAILBOX}/${m.id}.json`,
-      JSON.stringify({ ...m, createdAt: new Date().toISOString() }),
-      { mode: 0o600 },
-    );
+    const target = `${MAILBOX}/${m.id}.json`,
+      temp = `${target}.${process.pid}.tmp`;
+    await writeFile(temp, JSON.stringify({ ...m, createdAt: new Date().toISOString() }), {
+      mode: 0o600,
+    });
+    await rename(temp, target);
     return { ok: true, messageId: `local-${m.id}` };
   },
 };
@@ -35,9 +37,17 @@ export async function localMailbox(): Promise<LocalLetter[]> {
     /^[0-9a-f-]{36}\.json$/.test(f),
   );
   const letters = await Promise.all(
-    files.map(async (f) => JSON.parse(await readFile(`${MAILBOX}/${f}`, 'utf8')) as LocalLetter),
+    files.map(async (f) => {
+      try {
+        return JSON.parse(await readFile(`${MAILBOX}/${f}`, 'utf8')) as LocalLetter;
+      } catch {
+        return null; // Unreadable leftovers are skipped rather than breaking the mailbox.
+      }
+    }),
   );
-  return letters.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  return letters
+    .filter((l): l is LocalLetter => l !== null)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
 // https://resend.com/docs/api-reference/emails/send-email — the outbox id is the idempotency
