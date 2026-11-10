@@ -1,9 +1,10 @@
 # Lockd staging demo on Render (docs/STAGING.md). Synthetic data only; no email provider, no
 # payments. Create it from the Render dashboard: New > Blueprint > this repository.
+# Free plans, no card needed: the web service sleeps when idle and free Postgres expires after 30 days.
 databases:
   - name: lockd-staging-db
     databaseName: lockd
-    plan: basic-256mb
+    plan: free
     postgresMajorVersion: '17'
     ipAllowList: [] # Reachable only from Render services in this workspace.
 
@@ -11,11 +12,11 @@ services:
   - type: web
     name: lockd-staging
     runtime: node
-    plan: starter # Pre-deploy commands need a paid instance.
+    plan: free
     buildCommand: npm ci --include=dev && npm run build
-    # Applies migrations, sets the restricted roles' passwords and seeds demo data.
-    preDeployCommand: npm run staging:release
-    startCommand: npm run start:server
+    # Free instances have no pre-deploy step, so the idempotent release (migrations, restricted
+    # role passwords, demo seed) runs before the server starts.
+    startCommand: npm run staging:release && npm run start:server
     healthCheckPath: /
     envVars:
       - key: NODE_VERSION
